@@ -11,14 +11,31 @@ $venvPython = Join-Path $root ".venv\Scripts\python.exe"
 $torchVersion = "2.12.1"
 $torchvisionVersion = "0.27.1"
 
+function Invoke-NativeProbe {
+    param([scriptblock]$Command)
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        $output = & $Command 2>$null
+        return [pscustomobject]@{
+            Succeeded = $LASTEXITCODE -eq 0
+            Output = $output
+        }
+    } catch {
+        return [pscustomobject]@{ Succeeded = $false; Output = $null }
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 if ($Backend -eq "Auto" -and $env:VISIONGATE_BACKEND -in @("CPU", "CUDA")) {
     $Backend = $env:VISIONGATE_BACKEND
 }
 if ($Backend -eq "Auto") {
     $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
     if ($nvidia) {
-        & $nvidia.Source --query-gpu=name --format=csv,noheader 2>$null | Out-Null
-        $Backend = if ($LASTEXITCODE -eq 0) { "CUDA" } else { "CPU" }
+        $probe = Invoke-NativeProbe { & $nvidia.Source --query-gpu=name --format=csv,noheader }
+        $Backend = if ($probe.Succeeded) { "CUDA" } else { "CPU" }
     } else {
         $Backend = "CPU"
     }
@@ -59,8 +76,8 @@ function Find-Python311 {
         $candidates += [pscustomobject]@{ File = $localPython; Prefix = @() }
     }
     foreach ($candidate in $candidates) {
-        & $candidate.File @($candidate.Prefix) -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) { return $candidate }
+        $probe = Invoke-NativeProbe { & $candidate.File @($candidate.Prefix) -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)" }
+        if ($probe.Succeeded) { return $candidate }
     }
     return $null
 }
@@ -95,7 +112,8 @@ try {
     Write-Host "Preparing the installer..." -ForegroundColor Cyan
     Invoke-VisionGatePython @("-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip")
 
-    $installedBackend = & $venvPython -c "import torch; print('cuda' if torch.version.cuda else 'cpu')" 2>$null
+    $backendProbe = Invoke-NativeProbe { & $venvPython -c "import torch; print('cuda' if torch.version.cuda else 'cpu')" }
+    $installedBackend = if ($backendProbe.Succeeded) { $backendProbe.Output | Select-Object -Last 1 } else { "" }
     $pipArguments = @("-m", "pip", "install", "--disable-pip-version-check")
     if ($Action -eq "Update") { $pipArguments += "--upgrade" }
     if ($installedBackend -and $installedBackend.Trim() -ne $backendName) {

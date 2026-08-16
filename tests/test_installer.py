@@ -1,5 +1,8 @@
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -42,6 +45,59 @@ class InstallerTests(unittest.TestCase):
 
         self.assertEqual(plan["backend"], "cuda")
         self.assertEqual(plan["torch_index"], "https://download.pytorch.org/whl/cu126")
+
+    def test_microsoft_store_python_alias_does_not_abort_before_winget_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "VisionGate"
+            scripts = root / "scripts"
+            scripts.mkdir(parents=True)
+            setup = scripts / SETUP.name
+            shutil.copy(SETUP, setup)
+            shutil.copy(
+                Path(os.environ["WINDIR"]) / "System32" / "where.exe",
+                Path(directory) / "winget.exe",
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = os.pathsep.join(
+                (
+                    directory,
+                    str(
+                        Path(os.environ["LOCALAPPDATA"])
+                        / "Microsoft"
+                        / "WindowsApps"
+                    ),
+                )
+            )
+            environment["LOCALAPPDATA"] = directory
+            environment["VISIONGATE_BACKEND"] = "CPU"
+
+            result = subprocess.run(
+                [
+                    str(
+                        Path(os.environ["WINDIR"])
+                        / "System32"
+                        / "WindowsPowerShell"
+                        / "v1.0"
+                        / "powershell.exe"
+                    ),
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(setup),
+                    "-Action",
+                    "Install",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Installing Python 3.11", result.stdout)
+        self.assertNotIn("Python was not found", result.stdout)
 
     def test_general_requirements_do_not_force_a_gpu_backend(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
