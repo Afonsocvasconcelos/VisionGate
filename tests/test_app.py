@@ -1,0 +1,736 @@
+import base64
+import hashlib
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import numpy as np
+
+os.environ["DISABLE_VISION"] = "1"
+
+from fastapi.testclient import TestClient
+from unittest.mock import patch
+
+import app as app_module
+from app import (
+    CONFIG,
+    DEFAULT_SETTINGS,
+    DoorController,
+    VisionManager,
+    _config,
+    app,
+    spatial_layout_descriptor,
+)
+from core import Database, Match, Profile
+
+
+class FakeEWeLink(BaseHTTPRequestHandler):
+    requests = []
+    fail_first = False
+    invalid_json = False
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.__class__.requests.append((self.path, json.loads(body)))
+        should_fail = self.__class__.fail_first and len(self.__class__.requests) == 1
+        self.send_response(500 if should_fail else 200)
+        self.end_headers()
+        if not should_fail:
+            self.wfile.write(b"not-json" if self.__class__.invalid_json else b'{"error":0}')
+
+    def log_message(self, _format, *args):
+        pass
+
+
+class DoorControllerTests(unittest.TestCase):
+    @staticmethod
+    def command(payload):
+        from Crypto.Cipher import AES
+
+        encrypted = base64.b64decode(payload["data"])
+        decrypted = AES.new(
+            hashlib.md5(b"1234567890abcdef").digest(),
+            AES.MODE_CBC,
+            base64.b64decode(payload["iv"]),
+        ).decrypt(encrypted)
+        return json.loads(decrypted[: -decrypted[-1]])["switches"][0]
+
+    def test_open_and_close_use_independently_configured_channels(self):
+        FakeEWeLink.requests = []
+        FakeEWeLink.fail_first = False
+        FakeEWeLink.invalid_json = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeEWeLink)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_port=server.server_port,
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_open_channel=1,
+            ewelink_close_channel=2,
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+            pulse_seconds=0.01,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "door.db")
+            try:
+                controller = DoorController(config, database)
+                self.assertTrue(controller.trigger("test open", action="open"))
+                deadline = time.time() + 3
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(controller.trigger("test close", action="close"))
+                deadline = time.time() + 3
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.01)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            self.assertEqual(
+                [self.command(payload) for _, payload in FakeEWeLink.requests],
+                [
+                    {"switch": "on", "outlet": 0},
+                    {"switch": "off", "outlet": 0},
+                    {"switch": "on", "outlet": 1},
+                    {"switch": "off", "outlet": 1},
+                ],
+            )
+            self.assertEqual(
+                [event.kind for event in database.events()],
+                ["door_close", "door_open"],
+            )
+
+    def test_uncertain_turn_on_still_sends_safety_turn_off(self):
+        FakeEWeLink.requests = []
+        FakeEWeLink.fail_first = True
+        FakeEWeLink.invalid_json = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeEWeLink)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_port=server.server_port,
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+            pulse_seconds=0.01,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "door.db")
+            try:
+                controller = DoorController(config, database)
+                self.assertTrue(controller.trigger("test"))
+                deadline = time.time() + 3
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.01)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            self.assertEqual(len(FakeEWeLink.requests), 2)
+            self.assertEqual(self.command(FakeEWeLink.requests[1][1])["switch"], "off")
+            self.assertEqual(database.events()[0].kind, "door_error")
+
+    def test_malformed_device_response_does_not_leave_controller_busy(self):
+        FakeEWeLink.requests = []
+        FakeEWeLink.fail_first = False
+        FakeEWeLink.invalid_json = True
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeEWeLink)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_port=server.server_port,
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+            pulse_seconds=0.01,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "door.db")
+            try:
+                controller = DoorController(config, database)
+                self.assertTrue(controller.trigger("test"))
+                deadline = time.time() + 3
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(controller.busy)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+    def test_cloud_control_opens_when_the_relay_is_not_reachable_over_lan(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"error":0}'
+
+        config = replace(
+            CONFIG,
+            ewelink_host="",
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="device-key",
+            ewelink_cloud_token="access-token",
+            ewelink_cloud_app_id="app-id",
+            ewelink_cloud_region="eu",
+            pulse_seconds=0.01,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.urlopen", side_effect=[Response(), Response()]
+        ) as opened:
+            database = Database(Path(directory) / "door.db")
+            controller = DoorController(config, database)
+            self.assertTrue(controller.trigger("cloud test", action="open"))
+            deadline = time.time() + 3
+            while controller.busy and time.time() < deadline:
+                time.sleep(0.01)
+            event_kind = database.events()[0].kind
+
+        requests = [call.args[0] for call in opened.call_args_list]
+        self.assertEqual(
+            [json.loads(request.data)["params"]["switches"][0] for request in requests],
+            [
+                {"switch": "on", "outlet": 0},
+                {"switch": "off", "outlet": 0},
+            ],
+        )
+        self.assertEqual(event_kind, "door_open")
+
+    def test_last_authorized_sighting_resets_the_automatic_close_timer(self):
+        FakeEWeLink.requests = []
+        FakeEWeLink.fail_first = False
+        FakeEWeLink.invalid_json = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeEWeLink)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_port=server.server_port,
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+            pulse_seconds=0.01,
+            auto_close_seconds=0.12,
+        )
+        profile = Profile(7, "Alice", "person", np.ones(2, np.float32), "now")
+        match = Match(profile, 0.96)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "auto-close.db")
+            controller = DoorController(config, database)
+            try:
+                controller.authorized_seen()
+                self.assertTrue(controller.trigger("Alice", match=match))
+                deadline = time.time() + 2
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.005)
+                time.sleep(0.06)
+                controller.authorized_seen()
+                time.sleep(0.075)
+                self.assertEqual(len(FakeEWeLink.requests), 2)
+                deadline = time.time() + 2
+                while len(FakeEWeLink.requests) < 4 and time.time() < deadline:
+                    time.sleep(0.01)
+            finally:
+                controller.stop()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+            self.assertEqual(
+                [self.command(payload) for _, payload in FakeEWeLink.requests],
+                [
+                    {"switch": "on", "outlet": 0},
+                    {"switch": "off", "outlet": 0},
+                    {"switch": "on", "outlet": 1},
+                    {"switch": "off", "outlet": 1},
+                ],
+            )
+            self.assertEqual(
+                [event.kind for event in database.events()],
+                ["door_close", "door_open"],
+            )
+
+    def test_manual_open_does_not_arm_automatic_close(self):
+        FakeEWeLink.requests = []
+        FakeEWeLink.fail_first = False
+        FakeEWeLink.invalid_json = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeEWeLink)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_port=server.server_port,
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+            pulse_seconds=0.01,
+            auto_close_seconds=0.03,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DoorController(config, Database(Path(directory) / "manual.db"))
+            try:
+                self.assertTrue(controller.trigger("manual open", action="open"))
+                deadline = time.time() + 2
+                while controller.busy and time.time() < deadline:
+                    time.sleep(0.005)
+                time.sleep(0.06)
+                self.assertEqual(len(FakeEWeLink.requests), 2)
+                self.assertFalse(controller.status()["auto_close_armed"])
+            finally:
+                controller.stop()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=1)
+
+
+class AppearanceTests(unittest.TestCase):
+    def test_same_average_colors_in_different_positions_remain_distinguishable(self):
+        first = np.empty((224, 112, 3), np.uint8)
+        second = np.empty_like(first)
+        first[:112], first[112:] = (30, 30, 220), (220, 30, 30)
+        second[:112], second[112:] = (220, 30, 30), (30, 30, 220)
+
+        similarity = float(
+            np.dot(spatial_layout_descriptor(first), spatial_layout_descriptor(second))
+        )
+
+        self.assertLess(similarity, 0)
+
+
+class WebAccessTests(unittest.TestCase):
+    def test_visiongate_logo_and_lan_access_information_are_available(self):
+        with patch("app.local_ipv4_addresses", return_value=["192.168.2.197"]):
+            with TestClient(app) as client:
+                logo = client.get("/logo.png")
+                network = client.get("/api/network")
+
+        self.assertEqual(logo.status_code, 200)
+        self.assertEqual(logo.headers["content-type"], "image/png")
+        self.assertEqual(
+            network.json()["urls"], ["http://192.168.2.197:8000"]
+        )
+
+    def test_invalid_door_settings_are_not_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "invalid-settings.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+
+            with self.assertRaises(ValueError):
+                manager.update_settings(
+                    {
+                        "ewelink_device_id": "1000abcd12",
+                        "ewelink_device_key": "device-key",
+                        "ewelink_host": "",
+                    }
+                )
+
+            saved = database.settings()
+            self.assertEqual(saved["ewelink_device_id"], "")
+            self.assertEqual(saved["ewelink_device_key"], "")
+
+    def test_recognition_model_and_lookalike_margin_are_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "recognition-settings.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+
+            manager.update_settings(
+                {
+                    "yolo_model": "yolo11s.pt",
+                    "match_margin": 0.07,
+                    "auto_close_seconds": 17,
+                }
+            )
+
+            self.assertEqual(manager.config.yolo_model, "yolo11s.pt")
+            self.assertEqual(manager.config.match_margin, 0.07)
+            self.assertEqual(database.settings()["match_margin"], 0.07)
+            self.assertEqual(manager.config.auto_close_seconds, 17)
+            self.assertEqual(database.settings()["auto_close_seconds"], 17)
+
+    def test_door_test_reports_the_completed_relay_failure(self):
+        class Door:
+            configured = True
+            busy = False
+            last_error = "eWeLink relay rejected the command"
+
+            @staticmethod
+            def trigger(*_args, **_kwargs):
+                return True
+
+        manager = type("Manager", (), {"door": Door()})()
+        with patch("app.MANAGER", manager):
+            with self.assertRaises(app_module.HTTPException) as raised:
+                app_module.test_door(app_module.DoorTest(confirm=True, action="open"))
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertIn("rejected", raised.exception.detail)
+
+    def test_dashboard_and_status_are_available_without_login(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/").status_code, 200)
+            self.assertEqual(client.get("/api/status").status_code, 200)
+
+    def test_camera_can_be_created_edited_and_deleted_in_app(self):
+        with TestClient(app) as client:
+            created = client.post(
+                "/api/cameras",
+                json={
+                    "name": "Test camera",
+                    "stream_url": "rtsp://test-camera.local:554/live",
+                    "username": "viewer",
+                    "password": "secret",
+                    "enabled": False,
+                },
+            )
+            self.assertEqual(created.status_code, 201)
+            camera_id = created.json()["id"]
+            updated = client.put(
+                f"/api/cameras/{camera_id}",
+                json={
+                    "name": "Edited camera",
+                    "stream_url": "rtsp://test-camera.local:554/stream2",
+                    "username": "viewer2",
+                    "password": "secret2",
+                    "enabled": False,
+                },
+            )
+            self.assertEqual(updated.status_code, 200)
+            cameras = client.get("/api/config").json()["cameras"]
+            self.assertEqual(
+                next(item for item in cameras if item["id"] == camera_id)["name"],
+                "Edited camera",
+            )
+            self.assertEqual(client.delete(f"/api/cameras/{camera_id}").status_code, 200)
+
+    def test_camera_connection_can_be_checked_before_saving(self):
+        class Capture:
+            def isOpened(self):
+                return True
+
+            def read(self):
+                return True, np.zeros((720, 1280, 3), np.uint8)
+
+            def set(self, *_args):
+                return True
+
+            def release(self):
+                pass
+
+        with patch("app.cv2.VideoCapture", return_value=Capture()) as opened:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/cameras/test",
+                    json={
+                        "name": "Front gate",
+                        "stream_url": "rtsp://camera.local:554/live",
+                        "username": "viewer",
+                        "password": "secret",
+                        "enabled": True,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"connected": True, "width": 1280, "height": 720})
+        self.assertIn("viewer:secret@camera.local", opened.call_args.args[0])
+
+    def test_camera_connection_failure_reports_the_pc_lan_address(self):
+        class ClosedCapture:
+            def isOpened(self):
+                return False
+
+            def set(self, *_args):
+                return True
+
+            def release(self):
+                pass
+
+        with patch("app.cv2.VideoCapture", return_value=ClosedCapture()), patch(
+            "app.local_ipv4_addresses", return_value=["192.168.2.197"]
+        ):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/cameras/test",
+                    json={
+                        "name": "Front gate",
+                        "stream_url": "rtsp://192.168.1.99:554/live",
+                        "username": "viewer",
+                        "password": "secret",
+                        "enabled": True,
+                    },
+                )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("192.168.2.197", response.json()["detail"])
+
+    def test_enabled_cameras_get_independent_workers(self):
+        class Worker:
+            def __init__(self, camera, *_args):
+                self.camera = camera
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def stop(self):
+                self.started = False
+
+            @staticmethod
+            def _message_frame(_message):
+                return b"placeholder"
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "independent-cameras.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            first = database.add_camera("Front", "rtsp://front.local:554/live")
+            second = database.add_camera("Side", "rtsp://side.local:554/live")
+            vision_config = replace(_config(settings), disable_vision=False)
+
+            with patch("app.VisionSystem", Worker):
+                manager = VisionManager(database, vision_config)
+                manager.start()
+                try:
+                    self.assertEqual(set(manager.workers), {first.id, second.id})
+                    self.assertIsNot(manager.workers[first.id], manager.workers[second.id])
+                    self.assertTrue(all(worker.started for worker in manager.workers.values()))
+                finally:
+                    manager.stop()
+
+    def test_editable_settings_and_event_history_are_exposed(self):
+        with TestClient(app) as client:
+            config = client.get("/api/config")
+            self.assertEqual(config.status_code, 200)
+            self.assertIn("match_threshold", config.json()["settings"])
+            self.assertIn("match_margin", config.json()["settings"])
+            self.assertIn("yolo_model", config.json()["settings"])
+            self.assertIn("auto_close_seconds", config.json()["settings"])
+            self.assertIn("ewelink_open_channel", config.json()["settings"])
+            events = client.get("/api/events")
+            self.assertEqual(events.status_code, 200)
+            self.assertIsInstance(events.json(), list)
+
+    def test_cloud_authorization_is_not_exposed_by_the_config_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "private-config.db")
+            database.update_settings(
+                {**DEFAULT_SETTINGS, "ewelink_cloud_token": "private-access-token"}
+            )
+            with patch("app.DATABASE", database):
+                with TestClient(app) as client:
+                    response = client.get("/api/config")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("private-access-token", response.text)
+        self.assertNotIn("ewelink_cloud_token", response.json()["settings"])
+
+    def test_ewelink_qr_setup_uses_the_local_oauth_callback(self):
+        with TestClient(app) as client:
+            setup = client.get("/api/ewelink/oauth/setup")
+
+        self.assertEqual(setup.status_code, 200)
+        self.assertEqual(
+            setup.json()["callback_url"],
+            "http://testserver/api/ewelink/oauth/callback",
+        )
+
+    def test_dashboard_offers_account_import_without_developer_credentials(self):
+        with TestClient(app) as client:
+            dashboard = client.get("/").text
+
+        self.assertIn("VisionGate", dashboard)
+        self.assertIn('src="/logo.png"', dashboard)
+        self.assertIn('id="yoloModel"', dashboard)
+        self.assertIn('id="matchMargin"', dashboard)
+        self.assertIn('id="enrollmentDialog"', dashboard)
+        self.assertIn('id="testCameraConnection"', dashboard)
+        self.assertIn('id="autoCloseSeconds"', dashboard)
+        self.assertIn('id="ewelinkQrLogin"', dashboard)
+        self.assertIn('id="ewelinkPasswordLogin"', dashboard)
+        self.assertIn('id="ewelinkImportDevice"', dashboard)
+        self.assertIn("No developer account required", dashboard)
+        self.assertIn("Device IP (optional)", dashboard)
+        self.assertIn("The account password is never saved", dashboard)
+
+    def test_ewelink_password_import_does_not_store_or_return_credentials(self):
+        cloud_devices = [
+            {
+                "id": "1000abcd12",
+                "name": "Garage",
+                "model": "4CHPROR2",
+                "online": True,
+                "device_key": "device-secret",
+            }
+        ]
+        with patch.object(
+            app_module.EWELINK_CLOUD,
+            "account_devices",
+            return_value=cloud_devices,
+        ) as account_devices, patch(
+            "app.add_lan_addresses", side_effect=lambda devices: devices
+        ):
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
+                response = client.post(
+                    "/api/ewelink/import/password",
+                    json={
+                        "account": "owner@example.com",
+                        "password": "account-secret",
+                        "country_code": "+351",
+                        "region": "eu",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        account_devices.assert_called_once_with(
+            "owner@example.com", "account-secret", "+351", "eu"
+        )
+        rendered = json.dumps(response.json())
+        self.assertNotIn("account-secret", rendered)
+        self.assertNotIn("device-secret", rendered)
+        self.assertEqual(response.json()["devices"][0]["id"], "1000abcd12")
+        saved = app_module.DATABASE.settings()
+        self.assertNotIn("ewelink_account", saved)
+        self.assertNotIn("ewelink_password", saved)
+        self.assertNotIn("ewelink_app_secret", saved)
+
+    def test_ewelink_login_is_rejected_over_an_unencrypted_lan_request(self):
+        with TestClient(app, client=("192.168.1.90", 50000)) as client:
+            qr = client.post(
+                "/api/ewelink/oauth/start",
+                json={"app_id": "developer-app", "app_secret": "developer-secret"},
+            )
+            password = client.post(
+                "/api/ewelink/import/password",
+                json={
+                    "account": "owner@example.com",
+                    "password": "account-secret",
+                    "country_code": "+351",
+                    "region": "eu",
+                },
+            )
+
+        self.assertEqual(qr.status_code, 403)
+        self.assertEqual(password.status_code, 403)
+
+    def test_imported_device_is_saved_with_user_selected_channels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "import.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+            session_id = app_module.EWELINK_IMPORTS.ready(
+                [
+                    {
+                        "id": "1000abcd12",
+                        "name": "Garage door",
+                        "model": "4CHPROR2",
+                        "online": True,
+                        "device_key": "device-secret",
+                    }
+                ]
+            )
+            original_manager = app_module.MANAGER
+            app_module.MANAGER = manager
+            try:
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/ewelink/import/apply",
+                        json={
+                            "session_id": session_id,
+                            "device_id": "1000abcd12",
+                            "host": "192.168.1.44",
+                            "port": 8081,
+                            "open_channel": 1,
+                            "close_channel": 2,
+                            "pulse_seconds": 1.0,
+                        },
+                    )
+            finally:
+                app_module.MANAGER = original_manager
+
+            self.assertEqual(response.status_code, 200)
+            saved = database.settings()
+            self.assertEqual(saved["ewelink_device_id"], "1000abcd12")
+            self.assertEqual(saved["ewelink_device_key"], "device-secret")
+            self.assertEqual(saved["ewelink_host"], "192.168.1.44")
+            self.assertEqual(saved["ewelink_open_channel"], 1)
+            self.assertEqual(saved["ewelink_close_channel"], 2)
+
+    def test_cloud_device_can_be_applied_without_a_lan_ip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "cloud-import.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+            session_id = app_module.EWELINK_IMPORTS.ready(
+                [
+                    {
+                        "id": "1000abcd12",
+                        "name": "Garage door",
+                        "model": "4CHPROR2",
+                        "online": True,
+                        "device_key": "device-secret",
+                        "_cloud_token": "access-token",
+                        "_cloud_app_id": "app-id",
+                        "_cloud_region": "eu",
+                    }
+                ]
+            )
+            original_manager = app_module.MANAGER
+            app_module.MANAGER = manager
+            try:
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/ewelink/import/apply",
+                        json={
+                            "session_id": session_id,
+                            "device_id": "1000abcd12",
+                            "host": "",
+                            "port": 8081,
+                            "open_channel": 1,
+                            "close_channel": 2,
+                            "pulse_seconds": 1.0,
+                        },
+                    )
+            finally:
+                app_module.MANAGER = original_manager
+
+            self.assertEqual(response.status_code, 200)
+            saved = database.settings()
+            self.assertEqual(saved["ewelink_host"], "")
+            self.assertEqual(saved["ewelink_cloud_token"], "access-token")
+
+
+if __name__ == "__main__":
+    unittest.main()
