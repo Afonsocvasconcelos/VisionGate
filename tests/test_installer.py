@@ -101,18 +101,38 @@ class InstallerTests(unittest.TestCase):
 
     def test_general_requirements_do_not_force_a_gpu_backend(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        setup_script = SETUP.read_text(encoding="utf-8")
         installer = (ROOT / "Install VisionGate.bat").read_text(encoding="utf-8")
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+        login_configurator = (ROOT / "Configure Login.bat").read_text(encoding="utf-8")
         updater = (ROOT / "Update VisionGate.bat").read_text(encoding="utf-8")
 
         self.assertNotIn("download.pytorch.org", requirements)
         self.assertNotIn("torch==", requirements)
+        check_action = setup_script.split('if ($Action -eq "Check")', 1)[1].split(
+            "exit 0", 1
+        )[0]
+        self.assertNotIn("import torch", check_action)
+        self.assertIn("find_spec", check_action)
+        self.assertIn('if ($Action -in @("Install", "Update", "Plan") -and $Backend -eq "Auto")', setup_script)
         self.assertNotIn("goto :no_git", updater)
         self.assertIn(r"scripts\Setup VisionGate.ps1", installer)
         self.assertIn(r"scripts\Setup VisionGate.ps1", launcher)
+        self.assertIn("auth.py --ensure", launcher)
+        self.assertIn("auth.py", login_configurator)
         self.assertIn(r"scripts\Setup VisionGate.ps1", updater)
+        self.assertTrue((ROOT / "Configure Login.bat").exists())
         self.assertTrue((ROOT / "Install VisionGate.bat").exists())
         self.assertTrue((ROOT / "Update VisionGate.bat").exists())
+
+    def test_updater_can_bootstrap_git_for_application_updates(self):
+        setup_script = SETUP.read_text(encoding="utf-8")
+        updater = (ROOT / "Update VisionGate.bat").read_text(encoding="utf-8")
+
+        self.assertIn('if ($Action -eq "SourceUpdate")', setup_script)
+        self.assertIn("Git.Git", setup_script)
+        self.assertIn("-Action SourceUpdate", updater)
+        self.assertNotIn("git pull", updater)
 
 
 if __name__ == "__main__":

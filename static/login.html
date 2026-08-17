@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#12202d">
+  <link rel="icon" href="/logo.png" type="image/png">
+  <link rel="stylesheet" href="/visiongate.css">
+  <title>Sign in · VisionGate</title>
+</head>
+<body class="auth-page">
+  <main class="auth-card" aria-labelledby="title">
+    <div class="auth-brand">
+      <img src="/logo.png" alt="">
+      <strong>VisionGate</strong>
+    </div>
+    <h1 id="title">Sign in to VisionGate</h1>
+    <form id="loginForm" class="auth-form">
+      <label for="username">Username
+        <input id="username" name="username" required maxlength="64" autocomplete="username" autocapitalize="none" spellcheck="false" autofocus>
+      </label>
+      <label for="password">Password
+        <span class="password-field">
+          <input id="password" name="password" type="password" required maxlength="128" autocomplete="current-password" autocapitalize="none" spellcheck="false">
+          <button id="showPassword" type="button" aria-label="Show password">Show</button>
+        </span>
+      </label>
+      <p id="message" role="alert" aria-live="polite"></p>
+      <button id="submit" class="btn primary" type="submit">Sign in</button>
+    </form>
+  </main>
+  <script src="/login.js" defer></script>
+</body>
+</html>

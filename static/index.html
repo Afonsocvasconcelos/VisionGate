@@ -3,520 +3,149 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#172f50">
+  <meta name="theme-color" content="#12202d">
   <link rel="icon" href="/logo.png" type="image/png">
-  <title>VisionGate · Visual access control</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --navy: #172f50;
-      --navy-2: #21456f;
-      --navy-3: #0e2037;
-      --blue: #2f6eaa;
-      --mint: #24a58a;
-      --mint-soft: #e4f5f0;
-      --red: #cf4d5b;
-      --amber: #c88921;
-      --ink: #172438;
-      --muted: #6f7e90;
-      --line: #dbe3eb;
-      --surface: #ffffff;
-      --canvas: #edf2f6;
-      --shadow: 0 16px 45px rgba(24, 47, 79, .09);
-    }
-
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--canvas);
-      color: var(--ink);
-      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    }
-    button, input, select { font: inherit; }
-    button { min-width: 0; cursor: pointer; }
-    button:disabled { cursor: not-allowed; opacity: .48; }
-    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-      outline: 3px solid rgba(47, 110, 170, .25);
-      outline-offset: 2px;
-    }
-
-    .topbar {
-      position: sticky;
-      z-index: 5;
-      top: 0;
-      background: linear-gradient(115deg, var(--navy-3), var(--navy));
-      color: white;
-      box-shadow: 0 8px 28px rgba(14, 32, 55, .2);
-    }
-    .topbar-inner {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 20px;
-      width: min(1540px, 100%);
-      min-height: 76px;
-      margin: auto;
-      padding: 10px 28px;
-    }
-    .brand, .top-actions, .health, .camera-actions, .feed-actions,
-    .section-heading, .dialog-actions, .import-actions, .status-line {
-      display: flex;
-      align-items: center;
-    }
-    .brand { gap: 13px; min-width: 0; }
-    .brand-logo {
-      width: 50px;
-      height: 50px;
-      object-fit: contain;
-      border-radius: 13px;
-      background: #fff;
-      padding: 4px;
-      box-shadow: 0 5px 18px rgba(0, 0, 0, .2);
-    }
-    .wordmark { font-size: 21px; font-weight: 780; letter-spacing: -.02em; }
-    .tagline { color: #b9cbe0; font-size: 12px; letter-spacing: .025em; }
-    .top-actions { gap: 10px; }
-    .health {
-      gap: 8px;
-      padding: 8px 12px;
-      border: 1px solid rgba(255, 255, 255, .13);
-      border-radius: 999px;
-      background: rgba(255, 255, 255, .06);
-      color: #d9e4ef;
-      font-size: 12px;
-    }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
-    .dot.ok { background: #55d9b7; box-shadow: 0 0 0 4px rgba(85, 217, 183, .12); }
-    .dot.bad { background: #ff7180; box-shadow: 0 0 0 4px rgba(255, 113, 128, .12); }
-    #networkLink { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
-
-    .shell { width: min(1540px, 100%); margin: auto; padding: 24px 28px 34px; }
-    .dashboard { display: grid; grid-template-columns: minmax(0, 1fr) 370px; align-items: start; gap: 20px; }
-    .side { display: grid; align-content: start; gap: 16px; }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
-      overflow: hidden;
-    }
-    .padded { padding: 18px; }
-    h1, h2, h3, h4, p { margin-top: 0; }
-    h2 { margin-bottom: 0; font-size: 15px; letter-spacing: -.01em; }
-    h3 { margin: 0; font-size: 14px; }
-    h4 { margin: 0 0 8px; font-size: 14px; }
-    .eyebrow {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 750;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-    }
-    .muted { color: var(--muted); }
-
-    .camera-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      padding: 13px 15px;
-      border-bottom: 1px solid var(--line);
-    }
-    .camera-picker { display: flex; align-items: center; gap: 10px; min-width: 0; }
-    .camera-picker select { min-width: 240px; }
-    .camera-actions { gap: 7px; }
-    .video-wrap {
-      position: relative;
-      display: grid;
-      min-height: 420px;
-      place-items: center;
-      overflow: hidden;
-      background: #07101c;
-    }
-    #feed { display: block; width: 100%; height: auto; cursor: default; }
-    .enrolling #feed { cursor: crosshair; }
-    .feed-overlay {
-      position: absolute;
-      inset: 15px 15px auto;
-      display: flex;
-      justify-content: space-between;
-      pointer-events: none;
-    }
-    .live-badge, .count-badge {
-      padding: 6px 9px;
-      border: 1px solid rgba(255, 255, 255, .16);
-      border-radius: 8px;
-      background: rgba(7, 16, 28, .78);
-      color: #eaf2fa;
-      backdrop-filter: blur(8px);
-      font-size: 10px;
-      font-weight: 750;
-      letter-spacing: .1em;
-      text-transform: uppercase;
-    }
-    .live-badge::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: #ff6677; }
-    .enroll-note {
-      display: none;
-      position: absolute;
-      inset: auto 18px 18px;
-      padding: 11px 14px;
-      border: 1px solid rgba(85, 217, 183, .5);
-      border-radius: 10px;
-      background: rgba(14, 47, 57, .9);
-      color: #d9fff4;
-      pointer-events: none;
-    }
-    .enrolling .enroll-note { display: block; }
-    .feed-footer {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 13px 15px;
-      border-top: 1px solid var(--line);
-    }
-    .feed-actions { gap: 8px; flex-wrap: wrap; }
-    .independent-note { color: var(--muted); font-size: 12px; text-align: right; }
-
-    .btn {
-      min-height: 38px;
-      padding: 8px 13px;
-      border: 1px solid #cfd9e3;
-      border-radius: 10px;
-      background: #fff;
-      color: #26384e;
-      font-weight: 680;
-      transition: background .15s, border-color .15s, transform .15s;
-    }
-    .btn:hover:not(:disabled) { border-color: #aebdcc; background: #f4f7fa; transform: translateY(-1px); }
-    .btn.primary { border-color: var(--navy); background: var(--navy); color: white; }
-    .btn.primary:hover:not(:disabled) { border-color: var(--navy-2); background: var(--navy-2); }
-    .btn.mint { border-color: #17866f; background: #17866f; color: white; }
-    .btn.danger { color: var(--red); }
-    .btn.ghost { border-color: rgba(255, 255, 255, .2); background: rgba(255, 255, 255, .08); color: white; }
-    .btn.small { min-height: 32px; padding: 5px 9px; font-size: 12px; }
-
-    .door-card {
-      padding: 18px;
-      background: linear-gradient(145deg, var(--navy-3), var(--navy));
-      color: white;
-    }
-    .door-card .eyebrow { color: #a9bdd5; }
-    .door-head { display: flex; justify-content: space-between; gap: 12px; }
-    .mode-badge { padding: 5px 8px; border-radius: 7px; background: rgba(255,255,255,.1); color: #c8d7e7; font-size: 11px; }
-    .door-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 17px; }
-    .door-button {
-      min-height: 68px;
-      border: 1px solid rgba(255, 255, 255, .16);
-      border-radius: 12px;
-      background: rgba(255, 255, 255, .08);
-      color: white;
-      font-weight: 750;
-    }
-    .door-button:first-child { border-color: rgba(85, 217, 183, .32); background: rgba(36, 165, 138, .23); }
-    .door-button:hover:not(:disabled) { background: rgba(255,255,255,.16); }
-    .door-button span { display: block; margin-top: 3px; color: #aebfd2; font-size: 10px; font-weight: 500; }
-
-    .section-heading { justify-content: space-between; gap: 10px; margin-bottom: 13px; }
-    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .stat { padding: 11px; border: 1px solid #e4eaf0; border-radius: 11px; background: #f7f9fb; }
-    .stat span { display: block; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
-    .stat strong { display: block; overflow: hidden; margin-top: 3px; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-    #event { margin: 12px 1px 0; color: #53647a; font-size: 12px; }
-    .status-line { gap: 7px; color: var(--muted); font-size: 12px; }
-
-    .tracks { display: flex; flex-wrap: wrap; gap: 7px; }
-    .track { padding: 6px 9px; border-radius: 8px; background: #eef3f7; color: #53647a; font-size: 11px; }
-    .track.match { background: var(--mint-soft); color: #14705d; font-weight: 700; }
-    .list { display: grid; gap: 8px; }
-    .empty { padding: 17px 4px; color: #8a97a5; text-align: center; font-size: 12px; }
-    .profile, .camera-row, .event-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px;
-      border: 1px solid #e2e8ef;
-      border-radius: 11px;
-      background: #fbfcfd;
-    }
-    .avatar { display: grid; flex: 0 0 36px; height: 36px; place-items: center; border-radius: 10px; background: #e8eef5; color: var(--navy-2); font-size: 10px; font-weight: 800; text-transform: uppercase; }
-    .profile-info, .row-info { min-width: 0; flex: 1; }
-    .profile-info strong, .profile-info small, .row-info strong, .row-info small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .profile-info small, .row-info small { color: var(--muted); font-size: 11px; }
-    .legacy { color: var(--amber); }
-    .remove { border: 0; background: transparent; color: #8794a3; font-size: 18px; }
-    .remove:hover { color: var(--red); }
-
-    .activity { margin-top: 20px; padding: 18px; }
-    .event-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 8px; }
-    .event-row { align-items: flex-start; }
-    .event-kind { flex: 0 0 auto; padding: 4px 7px; border-radius: 6px; background: #e8eef5; color: var(--navy-2); font-size: 9px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
-
-    dialog {
-      width: min(760px, calc(100vw - 26px));
-      max-height: 92vh;
-      padding: 0;
-      border: 1px solid #d7e0e8;
-      border-radius: 18px;
-      background: #fff;
-      color: var(--ink);
-      box-shadow: 0 30px 100px rgba(10, 25, 43, .35);
-      overflow: hidden;
-    }
-    dialog > form { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; max-height: 92vh; }
-    #settingsDialog { width: min(980px, calc(100vw - 26px)); }
-    dialog::backdrop { background: rgba(11, 25, 42, .62); backdrop-filter: blur(3px); }
-    .dialog-head, .dialog-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
-    .dialog-head { border-bottom: 1px solid var(--line); }
-    .dialog-head h2 { font-size: 17px; }
-    .dialog-body { padding: 19px 20px; overflow: auto; }
-    .dialog-actions { justify-content: flex-end; border-top: 1px solid var(--line); }
-    .close { min-width: 34px; min-height: 34px; border: 0; border-radius: 8px; background: transparent; color: #66768a; font-size: 22px; }
-    .close:hover { background: #eef2f6; }
-    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
-    label { display: grid; gap: 5px; color: #586a7f; font-size: 11px; font-weight: 650; }
-    label.wide, .form-grid > .wide { grid-column: 1 / -1; }
-    input, select {
-      width: 100%;
-      min-height: 40px;
-      padding: 8px 10px;
-      border: 1px solid #cdd8e2;
-      border-radius: 9px;
-      background: #fff;
-      color: var(--ink);
-      font-weight: 450;
-    }
-    input:focus, select:focus { border-color: var(--blue); outline: 3px solid rgba(47,110,170,.12); }
-    .checkbox { display: flex; align-items: center; gap: 9px; padding-top: 8px; }
-    .checkbox input { width: 17px; min-height: auto; }
-    .notice { margin: 0 0 14px; padding: 11px 12px; border: 1px solid #d9e2ea; border-radius: 10px; background: #f4f7fa; color: #5c6e82; font-size: 11px; }
-    .tabs { display: flex; gap: 5px; padding: 5px; border-radius: 11px; background: #eef2f6; }
-    .tab { flex: 1; padding: 8px; border: 0; border-radius: 8px; background: transparent; color: #65758a; font-weight: 700; }
-    .tab.active { background: white; color: var(--navy); box-shadow: 0 2px 7px rgba(23, 47, 80, .1); }
-    .tab-panel { display: none; padding-top: 18px; }
-    .tab-panel.active { display: block; }
-    .settings-section + .settings-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
-    .settings-section h3 { margin-bottom: 10px; }
-    .import-card { margin-top: 13px; padding: 15px; border: 1px solid #cadbe7; border-radius: 12px; background: #f5f9fc; }
-    .import-actions { flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    .import-status { margin: 9px 0 0; color: #617287; font-size: 11px; }
-    .import-result { display: none; margin-top: 14px; padding-top: 14px; border-top: 1px solid #d8e2ea; }
-    .import-result.show { display: block; }
-    details { margin-top: 12px; }
-    summary { color: var(--navy-2); cursor: pointer; font-weight: 650; }
-    .field-help { color: #8995a3; font-size: 10px; font-weight: 450; }
-
-    #toast {
-      position: fixed;
-      z-index: 20;
-      right: 22px;
-      bottom: 22px;
-      max-width: 390px;
-      padding: 12px 15px;
-      border-radius: 11px;
-      background: var(--navy-3);
-      color: white;
-      box-shadow: 0 14px 44px rgba(10, 25, 43, .3);
-      opacity: 0;
-      transform: translateY(10px);
-      transition: .18s;
-      pointer-events: none;
-    }
-    #toast.show { opacity: 1; transform: none; }
-
-    @media (max-width: 980px) {
-      .dashboard { grid-template-columns: 1fr; }
-      .side { grid-template-columns: 1fr 1fr; }
-      .door-card { grid-column: 1 / -1; }
-    }
-    @media (max-width: 650px) {
-      body { overflow-x: hidden; }
-      .topbar-inner { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 66px; padding: 8px 14px; }
-      .brand-logo { width: 43px; height: 43px; }
-      .wordmark { font-size: 19px; }
-      .brand { min-width: 0; overflow: hidden; }
-      .tagline, .top-actions .health, #networkLink, .independent-note { display: none; }
-      .health { padding: 7px 9px; }
-      .shell { padding: 14px 10px 24px; }
-      .dashboard, .side, .card { min-width: 0; }
-      .dashboard { gap: 12px; }
-      .side, .form-grid { grid-template-columns: 1fr; }
-      .door-card { grid-column: auto; }
-      label.wide, .form-grid > .wide { grid-column: auto; }
-      .camera-bar { align-items: stretch; flex-direction: column; }
-      .camera-picker { align-items: stretch; flex-direction: column; gap: 4px; }
-      .camera-picker select { min-width: 0; width: 100%; }
-      .camera-actions, .door-controls, .feed-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
-      .video-wrap { min-height: 230px; }
-      .feed-footer { align-items: stretch; flex-direction: column; }
-      .feed-actions { display: grid; grid-template-columns: 1fr 1fr; }
-      #enroll { grid-column: 1 / -1; }
-      .activity { margin-top: 12px; }
-      .event-list { grid-template-columns: 1fr; }
-      .dialog-body { padding: 15px; }
-      .dialog-head, .dialog-actions { padding: 13px 15px; }
-      .dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-  </style>
+  <link rel="stylesheet" href="/visiongate.css">
+  <title>VisionGate</title>
 </head>
 <body>
+  <a class="skip-link" href="#liveCamera">Skip to live camera</a>
   <header class="topbar">
-    <div class="topbar-inner">
-      <div class="brand">
-        <img class="brand-logo" src="/logo.png" alt="VisionGate logo">
-        <div><div class="wordmark">VisionGate</div><div class="tagline">Visual access control</div></div>
-      </div>
-      <div class="top-actions">
-        <div class="health" title="Selected camera status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></div>
-        <div class="health" id="networkLink" title="Address for other devices">Local network</div>
-        <button id="openSettings" class="btn ghost" type="button">Settings</button>
-      </div>
+    <a class="brand" href="#liveCamera" aria-label="VisionGate home">
+      <img src="/logo.png" alt="">
+      <strong>VisionGate</strong>
+    </a>
+    <div class="top-actions">
+      <span class="connection"><span id="dot" class="dot" aria-hidden="true"></span><span id="connection">Connecting</span></span>
+      <button id="openSettings" class="btn small" type="button">Settings</button>
+      <button id="logout" class="btn small" type="button">Sign out</button>
     </div>
   </header>
 
-  <main class="shell">
-    <div class="dashboard">
-      <section class="card" aria-label="Live camera">
-        <div class="camera-bar">
-          <div class="camera-picker"><span class="eyebrow">Active camera</span><select id="cameraSelect" aria-label="Active camera"></select></div>
-          <div class="camera-actions"><button id="addCamera" class="btn small" type="button">+ Add</button><button id="editCamera" class="btn small" type="button">Edit</button></div>
+  <main class="dashboard">
+    <section id="liveCamera" class="panel camera-panel" aria-labelledby="cameraTitle" tabindex="-1">
+      <header class="panel-header">
+        <h1 id="cameraTitle">Live camera</h1>
+        <div class="camera-tools">
+          <select id="cameraSelect" aria-label="Active camera"></select>
+          <button id="editCamera" class="btn small" type="button">Edit</button>
+          <button id="addCamera" class="btn small" type="button">Add</button>
         </div>
-        <div id="videoWrap" class="video-wrap">
-          <img id="feed" alt="Selected live camera with tracked objects">
-          <div class="feed-overlay"><span class="live-badge">Live</span><span id="trackCount" class="count-badge">0 targets</span></div>
-          <div class="enroll-note">Select a clearly visible target inside its box</div>
-        </div>
-        <div class="feed-footer">
-          <div class="feed-actions">
-            <button id="enroll" class="btn primary" type="button">Enroll identity</button>
-            <button id="testOpen" class="btn" type="button">Open door</button>
-            <button id="testClose" class="btn" type="button">Close door</button>
-          </div>
-          <div class="independent-note">Each enabled camera detects independently</div>
+      </header>
+      <div id="videoWrap" class="video-wrap">
+        <img id="feed" alt="Selected live camera with tracked objects">
+        <div class="enroll-note">Tap the target to authorize</div>
+      </div>
+      <footer class="feed-footer">
+        <button id="enroll" class="btn primary" type="button">Authorize a target</button>
+      </footer>
+    </section>
+
+    <aside class="side-column">
+      <section class="panel door-card" aria-labelledby="doorTitle">
+        <header class="door-head">
+          <h2 id="doorTitle">Door</h2>
+          <div id="doorStateBox" class="door-state" data-state="unknown"><span>Last known</span><strong id="doorState">Checking...</strong></div>
+        </header>
+        <p id="doorTiming" class="door-timing" hidden></p>
+        <div class="door-controls">
+          <button id="doorOpenCard" class="door-button" type="button">Open</button>
+          <button id="doorCloseCard" class="door-button" type="button">Close</button>
         </div>
       </section>
 
-      <aside class="side">
-        <section class="card door-card" aria-label="Door controls">
-          <div class="door-head"><div><span class="eyebrow">Connected door</span><h2 id="doorName">Entrance</h2></div><span id="doorMode" class="mode-badge">Checking</span></div>
-          <div class="door-controls">
-            <button id="doorOpenCard" class="door-button" type="button">Open<span id="openChannel">Channel —</span></button>
-            <button id="doorCloseCard" class="door-button" type="button">Close<span id="closeChannel">Channel —</span></button>
-          </div>
-        </section>
-
-        <section class="card padded">
-          <div class="section-heading"><div><span class="eyebrow">System</span><h2>Current state</h2></div></div>
-          <div class="stats">
-            <div class="stat"><span>Camera</span><strong id="camera">—</strong></div>
-            <div class="stat"><span>Recognition</span><strong id="vision">—</strong></div>
-            <div class="stat"><span>Door</span><strong id="door">—</strong></div>
-            <div class="stat"><span>Threshold</span><strong id="threshold">—</strong></div>
-          </div>
-          <p id="event">Loading system state…</p>
-        </section>
-
-        <section class="card padded">
-          <div class="section-heading"><div><span class="eyebrow">In frame</span><h2>Live targets</h2></div></div>
-          <div id="tracks" class="tracks"><span class="empty">Nothing detected</span></div>
-        </section>
-
-        <section class="card padded">
-          <div class="section-heading"><div><span class="eyebrow">Allowed access</span><h2>Whitelist</h2></div><span id="profileCount" class="muted">0</span></div>
-          <div id="profiles" class="list"><div class="empty">No identities enrolled</div></div>
-        </section>
-      </aside>
-    </div>
-
-    <section class="card activity">
-      <div class="section-heading"><div><span class="eyebrow">Persistent history</span><h2>Recent activity</h2></div><button id="clearEvents" class="btn small danger" type="button">Clear history</button></div>
-      <div id="events" class="event-list"><div class="empty">No events yet</div></div>
-    </section>
+      <section id="access" class="panel access-panel" aria-labelledby="accessTitle">
+        <header class="section-heading">
+          <h2 id="accessTitle">Authorized</h2>
+          <span id="profileCount" class="count">0</span>
+        </header>
+        <div id="profiles" class="list"><div class="empty">No authorized targets</div></div>
+      </section>
+    </aside>
   </main>
 
   <dialog id="enrollmentDialog">
     <form id="enrollmentForm">
-      <div class="dialog-head"><div><span class="eyebrow">New whitelist entry</span><h2>Name this identity</h2></div><button class="close" type="button" data-close="enrollmentDialog" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><span class="panel-kicker">New whitelist entry</span><h2>Name this identity</h2></div><button class="close" type="button" data-close="enrollmentDialog" aria-label="Close">×</button></div>
       <div class="dialog-body">
         <p class="notice">Use a unique name. For best accuracy, enroll the person or vehicle when it is clear, close, and fully visible.</p>
         <input id="enrollmentX" type="hidden"><input id="enrollmentY" type="hidden">
-        <label>Identity name<input id="enrollmentName" required maxlength="60" placeholder="Example: Alice or Blue hatchback" autocomplete="off"></label>
+        <div class="form-grid"><label class="wide" for="enrollmentName">Identity name<input id="enrollmentName" required maxlength="60" placeholder="Example: Alice or blue hatchback" autocomplete="off"></label></div>
       </div>
-      <div class="dialog-actions"><button class="btn" type="button" data-close="enrollmentDialog">Cancel</button><button class="btn primary" type="submit">Add to whitelist</button></div>
+      <div class="dialog-actions"><button class="btn" type="button" data-close="enrollmentDialog">Cancel</button><button class="btn primary" type="submit">Add to access list</button></div>
     </form>
   </dialog>
 
   <dialog id="cameraDialog">
     <form id="cameraForm">
-      <div class="dialog-head"><div><span class="eyebrow">Camera device</span><h2 id="cameraDialogTitle">Add camera</h2></div><button class="close" type="button" data-close="cameraDialog" aria-label="Close">×</button></div>
-      <div class="dialog-body"><div class="form-grid">
-        <input id="cameraId" type="hidden">
-        <label class="wide">Camera name<input id="cameraName" required maxlength="60" placeholder="Front gate"></label>
-        <label class="wide">RTSP stream URL<input id="cameraUrl" required maxlength="1000" placeholder="rtsp://192.168.1.50:554/live"></label>
-        <label>RTSP username<input id="cameraUsername" maxlength="200" autocomplete="off"></label>
-        <label>RTSP password<input id="cameraPassword" type="password" maxlength="200" autocomplete="new-password"></label>
-        <label class="checkbox"><input id="cameraEnabled" type="checkbox" checked> Enable detection on this camera</label>
-        <p id="cameraTestStatus" class="import-status wide" role="status" aria-live="polite"></p>
-      </div></div>
+      <div class="dialog-head"><div><span class="panel-kicker">Camera device</span><h2 id="cameraDialogTitle">Add camera</h2></div><button class="close" type="button" data-close="cameraDialog" aria-label="Close">×</button></div>
+      <div class="dialog-body">
+        <div class="form-grid">
+          <input id="cameraId" type="hidden">
+          <label class="wide" for="cameraName">Camera name<input id="cameraName" required maxlength="60" placeholder="Front gate"></label>
+          <label class="wide" for="cameraUrl">RTSP stream URL<input id="cameraUrl" required maxlength="1000" placeholder="rtsp://192.168.1.50:554/live"></label>
+          <label for="cameraUsername">RTSP username<input id="cameraUsername" maxlength="200" autocomplete="off"></label>
+          <label for="cameraPassword">RTSP password<input id="cameraPassword" type="password" maxlength="200" autocomplete="new-password"></label>
+          <label class="checkbox wide" for="cameraEnabled"><input id="cameraEnabled" type="checkbox" checked>Enable detection on this camera</label>
+          <p id="cameraTestStatus" class="import-status wide" role="status" aria-live="polite"></p>
+        </div>
+      </div>
       <div class="dialog-actions"><button id="deleteCamera" class="btn danger" type="button">Delete</button><button id="testCameraConnection" class="btn" type="button">Test connection</button><button class="btn" type="button" data-close="cameraDialog">Cancel</button><button class="btn primary" type="submit">Save camera</button></div>
     </form>
   </dialog>
 
   <dialog id="settingsDialog">
     <form id="settingsForm">
-      <div class="dialog-head"><div><span class="eyebrow">VisionGate</span><h2>Settings</h2></div><button class="close" type="button" data-close="settingsDialog" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><span class="panel-kicker">VisionGate</span><h2>Settings</h2></div><button class="close" type="button" data-close="settingsDialog" aria-label="Close">×</button></div>
       <div class="dialog-body">
-        <p class="notice">Authentication is disabled. Camera and door credentials are stored in the local SQLite database. Keep VisionGate on a trusted private network.</p>
+        <p class="notice">This dashboard uses a file-only login. Run <strong>Configure Login.bat</strong> on the VisionGate PC to change it; credentials cannot be changed here.</p>
         <div class="tabs" role="tablist" aria-label="Settings sections">
-          <button class="tab active" type="button" role="tab" aria-selected="true" data-tab="camerasTab">Cameras</button>
-          <button class="tab" type="button" role="tab" aria-selected="false" data-tab="recognitionTab">Recognition</button>
-          <button class="tab" type="button" role="tab" aria-selected="false" data-tab="doorTab">Door & eWeLink</button>
+          <button id="camerasTabButton" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="camerasTab" data-tab="camerasTab">Cameras</button>
+          <button id="recognitionTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="recognitionTab" data-tab="recognitionTab">Recognition</button>
+          <button id="doorTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="doorTab" data-tab="doorTab">Door &amp; eWeLink</button>
         </div>
 
-        <section id="camerasTab" class="tab-panel active" role="tabpanel">
-          <div class="section-heading"><div><h3>Camera devices</h3><span class="field-help">Streams run and track independently.</span></div><button id="settingsAddCamera" class="btn small" type="button">+ Add camera</button></div>
+        <section id="camerasTab" class="tab-panel active" role="tabpanel" aria-labelledby="camerasTabButton">
+          <div class="section-heading"><div><h3>Camera devices</h3><span class="field-help">Every enabled stream detects and tracks independently.</span></div><button id="settingsAddCamera" class="btn small" type="button">Add camera</button></div>
           <div id="cameraList" class="list"></div>
         </section>
 
-        <section id="recognitionTab" class="tab-panel" role="tabpanel">
+        <section id="recognitionTab" class="tab-panel" role="tabpanel" aria-labelledby="recognitionTabButton">
           <div class="settings-section">
-            <h3>Detection model</h3>
+            <h3>Detection engine</h3>
             <div class="form-grid">
-              <label>YOLO model<select id="yoloModel"><option value="yolo11n.pt">YOLO11 Nano · fastest</option><option value="yolo11s.pt">YOLO11 Small · recommended</option><option value="yolo11m.pt">YOLO11 Medium · most accurate</option></select></label>
-              <label>YOLO image size<input id="yoloImgsz" type="number" min="320" max="1280" step="32"></label>
-              <label>Detection confidence<input id="detectionConfidence" type="number" min="0.05" max="0.95" step="0.05"></label>
-              <label>Video JPEG quality<input id="jpegQuality" type="number" min="40" max="100" step="1"></label>
+              <label for="yoloModel">YOLO model<select id="yoloModel"><option value="yolo11n.pt">YOLO11 Nano · fastest</option><option value="yolo11s.pt">YOLO11 Small · recommended</option><option value="yolo11m.pt">YOLO11 Medium · most accurate</option></select></label>
+              <label for="yoloImgsz">YOLO image size<input id="yoloImgsz" type="number" min="320" max="1280" step="32"></label>
+              <label for="detectionConfidence">Detection confidence<input id="detectionConfidence" type="number" min="0.05" max="0.95" step="0.05"></label>
+              <label for="jpegQuality">Video JPEG quality<input id="jpegQuality" type="number" min="40" max="100" step="1"></label>
             </div>
           </div>
           <div class="settings-section">
-            <h3>Identity matching</h3>
+            <h3>Recognition and automation</h3>
             <div class="form-grid">
-              <label>Match threshold<input id="matchThreshold" type="number" min="0.1" max="0.999" step="0.01"><span class="field-help">Higher rejects more uncertain matches.</span></label>
-              <label>Lookalike margin<input id="matchMargin" type="number" min="0" max="0.25" step="0.01"><span class="field-help">Rejects two identities that score too closely.</span></label>
-              <label>Required confirmations<input id="matchConfirmations" type="number" min="1" max="20" step="1"></label>
-              <label>Appearance update interval<input id="embedEvery" type="number" min="1" max="60" step="1"></label>
-              <label>Door cooldown seconds<input id="cooldown" type="number" min="0" max="3600" step="1"></label>
+              <label for="matchThreshold">Match threshold<input id="matchThreshold" type="number" min="0.1" max="0.999" step="0.01"><span class="field-help">Higher rejects more uncertain matches.</span></label>
+              <label for="matchMargin">Lookalike margin<input id="matchMargin" type="number" min="0" max="0.25" step="0.01"><span class="field-help">Rejects identities that score too closely.</span></label>
+              <label for="matchConfirmations">Required confirmations<input id="matchConfirmations" type="number" min="1" max="20" step="1"></label>
+              <label for="embedEvery">Appearance update interval<input id="embedEvery" type="number" min="1" max="60" step="1"></label>
+              <label for="cooldown">Door cooldown seconds<input id="cooldown" type="number" min="0" max="3600" step="1"></label>
             </div>
           </div>
         </section>
 
-        <section id="doorTab" class="tab-panel" role="tabpanel">
+        <section id="doorTab" class="tab-panel" role="tabpanel" aria-labelledby="doorTabButton">
           <div class="settings-section">
-            <h3>Relay configuration</h3>
+            <h3>Door relay</h3>
             <p class="notice">Your 4CH Pro R2 uses channel 1 to open and channel 2 to close. A reachable IP enables fast LAN control; otherwise VisionGate uses the imported cloud connection.</p>
             <div class="form-grid">
-              <label class="wide">Device model<input id="ewelinkModel" required maxlength="80" placeholder="SONOFF 4CH Pro R2"></label>
-              <label>Device IP (optional)<input id="ewelinkHost" maxlength="45" placeholder="Cloud control when blank"></label>
-              <label>LAN port<input id="ewelinkPort" type="number" min="1" max="65535" step="1"></label>
-              <label>Device ID<input id="ewelinkDeviceId" maxlength="32" placeholder="1000xxxxxxxx"></label>
-              <label>Device key<input id="ewelinkDeviceKey" type="password" maxlength="128" autocomplete="new-password"></label>
-              <label>Open channel<select id="ewelinkOpenChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
-              <label>Close channel<select id="ewelinkCloseChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
-              <label>Relay pulse seconds<input id="pulseSeconds" type="number" min="0.1" max="30" step="0.1"></label>
-              <label>Auto-close delay<input id="autoCloseSeconds" type="number" min="0" max="3600" step="1"><span class="field-help">Seconds after the last authorized target leaves. Use 0 to disable.</span></label>
+              <label class="wide" for="ewelinkModel">Device model<input id="ewelinkModel" required maxlength="80" placeholder="SONOFF 4CH Pro R2"></label>
+              <label for="ewelinkHost">Device IP (optional)<input id="ewelinkHost" maxlength="45" placeholder="Cloud control when blank"></label>
+              <label for="ewelinkPort">LAN port<input id="ewelinkPort" type="number" min="1" max="65535" step="1"></label>
+              <label for="ewelinkDeviceId">Device ID<input id="ewelinkDeviceId" maxlength="32" placeholder="1000xxxxxxxx"></label>
+              <label for="ewelinkDeviceKey">Device key<input id="ewelinkDeviceKey" type="password" maxlength="128" autocomplete="new-password"></label>
+              <label for="ewelinkOpenChannel">Open channel<select id="ewelinkOpenChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+              <label for="ewelinkCloseChannel">Close channel<select id="ewelinkCloseChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+              <label for="pulseSeconds">Relay pulse seconds<input id="pulseSeconds" type="number" min="0.1" max="30" step="0.1"></label>
+              <label for="autoCloseSeconds">Auto-close delay<input id="autoCloseSeconds" type="number" min="0" max="3600" step="1"><span class="field-help">Seconds after the last authorized target leaves. Use 0 to disable.</span></label>
             </div>
           </div>
 
@@ -524,25 +153,25 @@
             <h4 id="ewelinkImportTitle">Import device from eWeLink</h4>
             <p class="import-status"><strong>No developer account required.</strong> Sign in once with the account used in the eWeLink app. The account password is never saved.</p>
             <div class="form-grid">
-              <label class="wide">eWeLink email or phone<input id="ewelinkAccount" maxlength="320" autocomplete="username"></label>
-              <label>eWeLink password<input id="ewelinkAccountPassword" type="password" maxlength="200" autocomplete="off"></label>
-              <label>Phone country code<input id="ewelinkCountryCode" maxlength="5" value="+351"></label>
-              <label>Account region<select id="ewelinkRegion"><option value="eu">Europe</option><option value="us">Americas</option><option value="as">Asia</option><option value="cn">Mainland China</option></select></label>
+              <label class="wide" for="ewelinkAccount">eWeLink email or phone<input id="ewelinkAccount" maxlength="320" autocomplete="username"></label>
+              <label for="ewelinkAccountPassword">eWeLink password<input id="ewelinkAccountPassword" type="password" maxlength="200" autocomplete="off"></label>
+              <label for="ewelinkCountryCode">Phone country code<input id="ewelinkCountryCode" maxlength="5" value="+351"></label>
+              <label for="ewelinkRegion">Account region<select id="ewelinkRegion"><option value="eu">Europe</option><option value="us">Americas</option><option value="as">Asia</option><option value="cn">Mainland China</option></select></label>
             </div>
             <div class="import-actions"><button id="ewelinkPasswordLogin" class="btn mint" type="button">Sign in and find devices</button></div>
             <details>
               <summary>Advanced: official developer QR login</summary>
               <p class="import-status">This fallback requires an eWeLink Developer App ID and Secret with the exact callback URL below.</p>
               <div class="form-grid">
-                <label>Developer App ID<input id="ewelinkAppId" maxlength="200" autocomplete="off"></label>
-                <label>Developer App Secret<input id="ewelinkAppSecret" type="password" maxlength="200" autocomplete="new-password"></label>
-                <label class="wide">OAuth callback URL<input id="ewelinkCallback" readonly></label>
+                <label for="ewelinkAppId">Developer App ID<input id="ewelinkAppId" maxlength="200" autocomplete="off"></label>
+                <label for="ewelinkAppSecret">Developer App Secret<input id="ewelinkAppSecret" type="password" maxlength="200" autocomplete="new-password"></label>
+                <label class="wide" for="ewelinkCallback">OAuth callback URL<input id="ewelinkCallback" readonly></label>
               </div>
               <div class="import-actions"><button id="copyEwelinkCallback" class="btn small" type="button">Copy callback</button><button id="ewelinkQrLogin" class="btn" type="button">Sign in with QR code</button></div>
             </details>
             <p id="ewelinkImportStatus" class="import-status" role="status" aria-live="polite"></p>
             <div id="ewelinkImportResult" class="import-result">
-              <div class="form-grid"><label class="wide">Choose device<select id="ewelinkImportDevice"></select></label></div>
+              <div class="form-grid"><label class="wide" for="ewelinkImportDevice">Choose device<select id="ewelinkImportDevice"></select></label></div>
               <div class="import-actions"><button id="ewelinkApplyImport" class="btn primary" type="button">Use selected device</button></div>
             </div>
           </section>
@@ -553,474 +182,6 @@
   </dialog>
 
   <div id="toast" role="status" aria-live="polite"></div>
-
-  <script>
-    const $ = id => document.getElementById(id);
-    let system = {cameras: [], profiles: [], door: {}, threshold: 0};
-    let config = {cameras: [], settings: {}};
-    let selectedCameraId = Number(localStorage.getItem("cameraId")) || null;
-    let loadedFeedId = null;
-    let enrolling = false;
-    let ewelinkImportSession = null;
-    let ewelinkImportedDevices = [];
-    let toastTimer;
-
-    function toast(message) {
-      clearTimeout(toastTimer);
-      $("toast").textContent = message;
-      $("toast").classList.add("show");
-      toastTimer = setTimeout(() => $("toast").classList.remove("show"), 3400);
-    }
-
-    async function api(url, options = {}) {
-      const response = await fetch(url, options);
-      if (!response.ok) {
-        let message = `Request failed (${response.status})`;
-        try { message = (await response.json()).detail || message; } catch (_) {}
-        throw new Error(message);
-      }
-      return response.json();
-    }
-
-    function selectedCamera() {
-      return system.cameras.find(camera => camera.id === selectedCameraId);
-    }
-
-    function syncCameraSelector() {
-      const ids = system.cameras.map(camera => camera.id);
-      if (!ids.includes(selectedCameraId)) selectedCameraId = ids[0] ?? null;
-      const select = $("cameraSelect");
-      select.replaceChildren();
-      for (const camera of system.cameras) {
-        const option = document.createElement("option");
-        option.value = camera.id;
-        option.textContent = `${camera.name} · ${camera.camera}`;
-        select.append(option);
-      }
-      select.value = String(selectedCameraId ?? "");
-      select.disabled = !ids.length;
-      if (selectedCameraId !== loadedFeedId) {
-        loadedFeedId = selectedCameraId;
-        $("feed").src = selectedCameraId ? `/video/${selectedCameraId}?v=${Date.now()}` : "";
-        localStorage.setItem("cameraId", selectedCameraId ?? "");
-      }
-      $("editCamera").disabled = !selectedCameraId;
-      $("enroll").disabled = !selectedCameraId;
-    }
-
-    function renderProfiles(profiles) {
-      const list = $("profiles");
-      list.replaceChildren();
-      $("profileCount").textContent = profiles.length;
-      if (!profiles.length) {
-        list.innerHTML = '<div class="empty">No identities enrolled</div>';
-        return;
-      }
-      for (const profile of profiles) {
-        const row = document.createElement("div");
-        row.className = "profile";
-        const avatar = document.createElement("div");
-        avatar.className = "avatar";
-        avatar.textContent = profile.label.slice(0, 3);
-        const info = document.createElement("div");
-        info.className = "profile-info";
-        const name = document.createElement("strong");
-        name.textContent = profile.name;
-        const label = document.createElement("small");
-        label.className = profile.descriptor === "legacy" ? "legacy" : "";
-        label.textContent = profile.descriptor === "legacy" ? `${profile.label} · remove, then re-enroll for enhanced accuracy` : `${profile.label} · enhanced appearance`;
-        const remove = document.createElement("button");
-        remove.className = "remove";
-        remove.type = "button";
-        remove.title = `Remove ${profile.name}`;
-        remove.setAttribute("aria-label", `Remove ${profile.name}`);
-        remove.textContent = "×";
-        remove.onclick = async () => {
-          if (!confirm(`Remove ${profile.name} from the whitelist?`)) return;
-          try { await api(`/api/whitelist/${profile.id}`, {method: "DELETE"}); await refreshAll(); }
-          catch (error) { toast(error.message); }
-        };
-        info.append(name, label);
-        row.append(avatar, info, remove);
-        list.append(row);
-      }
-    }
-
-    function renderTracks(tracks = []) {
-      const list = $("tracks");
-      list.replaceChildren();
-      $("trackCount").textContent = `${tracks.length} target${tracks.length === 1 ? "" : "s"}`;
-      if (!tracks.length) {
-        list.innerHTML = '<span class="empty">Nothing detected</span>';
-        return;
-      }
-      for (const track of tracks) {
-        const chip = document.createElement("span");
-        chip.className = `track${track.match ? " match" : ""}`;
-        chip.textContent = track.match ? `${track.label} #${track.id} · ${track.match} ${(track.similarity * 100).toFixed(0)}%` : `${track.label} #${track.id}`;
-        list.append(chip);
-      }
-    }
-
-    function renderSystem() {
-      syncCameraSelector();
-      const camera = selectedCamera();
-      const online = camera?.camera === "connected" && camera?.vision.startsWith("running");
-      const doorReady = Boolean(system.door.configured);
-      const doorBusy = Boolean(system.door.busy);
-      const mode = doorReady ? system.door.mode : "Not configured";
-      $("camera").textContent = camera?.camera || "No cameras";
-      $("vision").textContent = camera?.vision || "—";
-      $("door").textContent = doorReady ? (doorBusy ? "Activating" : mode) : "Not configured";
-      $("doorName").textContent = system.door.model || "Entrance";
-      $("doorMode").textContent = system.door.auto_close_armed ? `Closes in ${Math.ceil(system.door.auto_close_remaining)}s` : doorBusy ? "Activating" : mode;
-      $("openChannel").textContent = `Channel ${system.door.open_channel ?? "—"}`;
-      $("closeChannel").textContent = `Channel ${system.door.close_channel ?? "—"}`;
-      for (const id of ["testOpen", "testClose", "doorOpenCard", "doorCloseCard"]) $(id).disabled = !doorReady || doorBusy;
-      $("threshold").textContent = `${(system.threshold * 100).toFixed(0)}%`;
-      $("event").textContent = camera?.last_error || camera?.last_event || "Add a camera to begin";
-      $("dot").className = `dot${online ? " ok" : camera?.vision === "failed" ? " bad" : ""}`;
-      $("connection").textContent = online ? `${camera.name} online` : camera?.camera || "No cameras";
-      renderTracks(camera?.tracks);
-      renderProfiles(system.profiles);
-    }
-
-    function renderEvents(events) {
-      const list = $("events");
-      list.replaceChildren();
-      if (!events.length) {
-        list.innerHTML = '<div class="empty">No events yet</div>';
-        return;
-      }
-      for (const event of events) {
-        const row = document.createElement("div");
-        row.className = "event-row";
-        const kind = document.createElement("span");
-        kind.className = "event-kind";
-        kind.textContent = event.kind.replaceAll("_", " ");
-        const info = document.createElement("div");
-        info.className = "row-info";
-        const message = document.createElement("strong");
-        message.textContent = event.message;
-        const meta = document.createElement("small");
-        meta.textContent = [new Date(event.created_at).toLocaleString(), event.camera_name, event.similarity != null ? `${(event.similarity * 100).toFixed(0)}%` : null].filter(Boolean).join(" · ");
-        info.append(message, meta);
-        row.append(kind, info);
-        list.append(row);
-      }
-    }
-
-    function renderCameraList() {
-      const list = $("cameraList");
-      list.replaceChildren();
-      if (!config.cameras.length) {
-        list.innerHTML = '<div class="empty">No cameras configured</div>';
-        return;
-      }
-      for (const camera of config.cameras) {
-        const row = document.createElement("div");
-        row.className = "camera-row";
-        const info = document.createElement("div");
-        info.className = "row-info";
-        const name = document.createElement("strong");
-        name.textContent = camera.name;
-        const url = document.createElement("small");
-        url.textContent = `${camera.enabled ? "Enabled" : "Disabled"} · ${camera.stream_url}`;
-        const edit = document.createElement("button");
-        edit.type = "button";
-        edit.className = "btn small";
-        edit.textContent = "Edit";
-        edit.onclick = () => openCameraDialog(camera);
-        info.append(name, url);
-        row.append(info, edit);
-        list.append(row);
-      }
-    }
-
-    function fillSettings() {
-      const s = config.settings;
-      $("yoloModel").value = s.yolo_model;
-      $("yoloImgsz").value = s.yolo_imgsz;
-      $("detectionConfidence").value = s.detection_confidence;
-      $("jpegQuality").value = s.jpeg_quality;
-      $("matchThreshold").value = s.match_threshold;
-      $("matchMargin").value = s.match_margin;
-      $("matchConfirmations").value = s.match_confirmations;
-      $("embedEvery").value = s.embed_every;
-      $("cooldown").value = s.open_cooldown_seconds;
-      $("ewelinkModel").value = s.ewelink_model ?? "SONOFF 4CH Pro R2";
-      $("ewelinkHost").value = s.ewelink_host ?? "";
-      $("ewelinkPort").value = s.ewelink_port ?? 8081;
-      $("ewelinkDeviceId").value = s.ewelink_device_id ?? "";
-      $("ewelinkDeviceKey").value = s.ewelink_device_key ?? "";
-      $("ewelinkOpenChannel").value = s.ewelink_open_channel ?? 1;
-      $("ewelinkCloseChannel").value = s.ewelink_close_channel ?? 2;
-      $("pulseSeconds").value = s.pulse_seconds;
-      $("autoCloseSeconds").value = s.auto_close_seconds ?? 5;
-      renderCameraList();
-    }
-
-    async function loadConfig() { config = await api("/api/config"); fillSettings(); }
-    async function refresh() {
-      try { system = await api("/api/status"); renderSystem(); }
-      catch (_) { $("dot").className = "dot bad"; $("connection").textContent = "Server unavailable"; }
-    }
-    async function refreshEvents() { try { renderEvents(await api("/api/events?limit=100")); } catch (_) {} }
-    async function refreshAll() { await Promise.all([refresh(), loadConfig(), refreshEvents()]); }
-    async function loadNetwork() {
-      try {
-        const network = await api("/api/network");
-        $("networkLink").textContent = network.urls[0] || "This computer only";
-      } catch (_) {}
-    }
-
-    function openCameraDialog(camera = null) {
-      $("cameraDialogTitle").textContent = camera ? "Edit camera" : "Add camera";
-      $("cameraId").value = camera?.id ?? "";
-      $("cameraName").value = camera?.name ?? "";
-      $("cameraUrl").value = camera?.stream_url ?? "";
-      $("cameraUsername").value = camera?.username ?? "";
-      $("cameraPassword").value = camera?.password ?? "";
-      $("cameraEnabled").checked = camera?.enabled ?? true;
-      $("cameraTestStatus").textContent = "";
-      $("deleteCamera").style.display = camera ? "" : "none";
-      $("cameraDialog").showModal();
-    }
-
-    function cameraPayload() {
-      return {name: $("cameraName").value.trim(), stream_url: $("cameraUrl").value.trim(), username: $("cameraUsername").value, password: $("cameraPassword").value, enabled: $("cameraEnabled").checked};
-    }
-
-    document.querySelectorAll("[data-close]").forEach(button => {
-      button.onclick = () => $(button.dataset.close).close();
-    });
-    document.querySelectorAll(".tab").forEach(tab => {
-      tab.onclick = () => {
-        document.querySelectorAll(".tab").forEach(item => { item.classList.toggle("active", item === tab); item.setAttribute("aria-selected", item === tab); });
-        document.querySelectorAll(".tab-panel").forEach(panel => panel.classList.toggle("active", panel.id === tab.dataset.tab));
-      };
-    });
-
-    $("cameraSelect").onchange = () => { selectedCameraId = Number($("cameraSelect").value); loadedFeedId = null; renderSystem(); };
-    $("addCamera").onclick = () => openCameraDialog();
-    $("settingsAddCamera").onclick = () => openCameraDialog();
-    $("editCamera").onclick = () => openCameraDialog(config.cameras.find(camera => camera.id === selectedCameraId));
-    $("openSettings").onclick = async () => {
-      try { await Promise.all([loadConfig(), loadEwelinkSetup()]); $("settingsDialog").showModal(); }
-      catch (error) { toast(error.message); }
-    };
-
-    $("cameraForm").onsubmit = async event => {
-      event.preventDefault();
-      const id = $("cameraId").value;
-      const body = cameraPayload();
-      try {
-        const camera = await api(id ? `/api/cameras/${id}` : "/api/cameras", {method: id ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-        selectedCameraId = camera.id;
-        loadedFeedId = null;
-        $("cameraDialog").close();
-        toast(`${camera.name} saved`);
-        await refreshAll();
-      } catch (error) { toast(error.message); }
-    };
-
-    $("testCameraConnection").onclick = async () => {
-      const button = $("testCameraConnection");
-      button.disabled = true;
-      $("cameraTestStatus").textContent = "Connecting to the RTSP stream…";
-      try {
-        const result = await api("/api/cameras/test", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(cameraPayload())});
-        $("cameraTestStatus").textContent = `Connected · ${result.width} × ${result.height}`;
-      } catch (error) {
-        $("cameraTestStatus").textContent = error.message;
-      } finally {
-        button.disabled = false;
-      }
-    };
-
-    $("deleteCamera").onclick = async () => {
-      const id = Number($("cameraId").value);
-      const camera = config.cameras.find(item => item.id === id);
-      if (!camera || !confirm(`Delete ${camera.name}?`)) return;
-      try {
-        await api(`/api/cameras/${id}`, {method: "DELETE"});
-        $("cameraDialog").close();
-        selectedCameraId = null;
-        loadedFeedId = null;
-        toast("Camera deleted");
-        await refreshAll();
-      } catch (error) { toast(error.message); }
-    };
-
-    $("settingsForm").onsubmit = async event => {
-      event.preventDefault();
-      const body = {
-        yolo_model: $("yoloModel").value,
-        yolo_imgsz: Number($("yoloImgsz").value),
-        detection_confidence: Number($("detectionConfidence").value),
-        jpeg_quality: Number($("jpegQuality").value),
-        match_threshold: Number($("matchThreshold").value),
-        match_margin: Number($("matchMargin").value),
-        match_confirmations: Number($("matchConfirmations").value),
-        embed_every: Number($("embedEvery").value),
-        open_cooldown_seconds: Number($("cooldown").value),
-        ewelink_model: $("ewelinkModel").value.trim(),
-        ewelink_host: $("ewelinkHost").value.trim(),
-        ewelink_port: Number($("ewelinkPort").value),
-        ewelink_device_id: $("ewelinkDeviceId").value.trim(),
-        ewelink_device_key: $("ewelinkDeviceKey").value.trim(),
-        ewelink_open_channel: Number($("ewelinkOpenChannel").value),
-        ewelink_close_channel: Number($("ewelinkCloseChannel").value),
-        pulse_seconds: Number($("pulseSeconds").value),
-        auto_close_seconds: Number($("autoCloseSeconds").value)
-      };
-      try {
-        await api("/api/settings", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-        $("settingsDialog").close();
-        toast("Settings saved; affected cameras are restarting");
-        await refreshAll();
-      } catch (error) { toast(error.message); }
-    };
-
-    function ewelinkDeveloperCredentials() {
-      const app_id = $("ewelinkAppId").value.trim();
-      const app_secret = $("ewelinkAppSecret").value.trim();
-      if (!app_id || !app_secret) throw new Error("Enter the eWeLink Developer App ID and App Secret first");
-      return {app_id, app_secret};
-    }
-
-    async function loadEwelinkSetup() {
-      const setup = await api("/api/ewelink/oauth/setup");
-      $("ewelinkCallback").value = setup.callback_url;
-      $("ewelinkQrLogin").disabled = !setup.local_login_allowed;
-      $("ewelinkPasswordLogin").disabled = !setup.local_login_allowed;
-      if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:8000 on the VisionGate PC to import an eWeLink device.";
-    }
-
-    function showImportedDevices(sessionId, devices) {
-      ewelinkImportSession = sessionId;
-      ewelinkImportedDevices = devices;
-      const select = $("ewelinkImportDevice");
-      select.replaceChildren();
-      for (const device of devices) {
-        const option = document.createElement("option");
-        option.value = device.id;
-        option.textContent = `${device.name} · ${device.model}${device.online ? " · online" : " · offline"}${device.host ? ` · ${device.host}` : ""}`;
-        select.append(option);
-      }
-      $("ewelinkImportResult").classList.add("show");
-      $("ewelinkImportStatus").textContent = `Found ${devices.length} compatible device${devices.length === 1 ? "" : "s"}. Select the door relay below.`;
-      syncImportedAddress();
-    }
-
-    function syncImportedAddress() {
-      const device = ewelinkImportedDevices.find(item => item.id === $("ewelinkImportDevice").value);
-      if (device?.host) { $("ewelinkHost").value = device.host; $("ewelinkPort").value = device.port || 8081; }
-    }
-
-    $("ewelinkImportDevice").onchange = syncImportedAddress;
-    async function waitForEwelink(sessionId) {
-      for (let attempt = 0; attempt < 300; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const status = await api(`/api/ewelink/import/${encodeURIComponent(sessionId)}`);
-        if (status.status === "ready") { showImportedDevices(sessionId, status.devices); return; }
-        if (status.status === "error") throw new Error(status.error);
-      }
-      throw new Error("eWeLink authorization timed out; start it again");
-    }
-
-    $("copyEwelinkCallback").onclick = async () => {
-      const input = $("ewelinkCallback");
-      try { await navigator.clipboard.writeText(input.value); toast("Callback URL copied"); }
-      catch (_) { input.select(); document.execCommand("copy"); toast("Callback URL copied"); }
-    };
-    $("ewelinkQrLogin").onclick = async () => {
-      let popup;
-      try {
-        const credentials = ewelinkDeveloperCredentials();
-        popup = window.open("about:blank", "ewelinkOAuth", "width=520,height=720");
-        if (!popup) throw new Error("Allow pop-ups for VisionGate, then try again");
-        popup.document.body.textContent = "Opening secure eWeLink authorization…";
-        $("ewelinkImportStatus").textContent = "Starting eWeLink QR authorization…";
-        const started = await api("/api/ewelink/oauth/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(credentials)});
-        $("ewelinkAppSecret").value = "";
-        popup.location.replace(started.authorization_url);
-        await waitForEwelink(started.session_id);
-      } catch (error) { popup?.close(); $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
-    };
-    $("ewelinkPasswordLogin").onclick = async () => {
-      try {
-        const body = {account: $("ewelinkAccount").value.trim(), password: $("ewelinkAccountPassword").value, country_code: $("ewelinkCountryCode").value.trim(), region: $("ewelinkRegion").value};
-        if (!body.account || !body.password) throw new Error("Enter the eWeLink account and password");
-        $("ewelinkImportStatus").textContent = "Signing in and finding compatible devices…";
-        const result = await api("/api/ewelink/import/password", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-        showImportedDevices(result.session_id, result.devices);
-      } catch (error) { $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
-      finally { $("ewelinkAccountPassword").value = ""; }
-    };
-    $("ewelinkApplyImport").onclick = async () => {
-      const device = ewelinkImportedDevices.find(item => item.id === $("ewelinkImportDevice").value);
-      const host = $("ewelinkHost").value.trim();
-      if (!device) return toast("Select an eWeLink device");
-      const body = {session_id: ewelinkImportSession, device_id: device.id, host, port: Number($("ewelinkPort").value) || 8081, open_channel: Number($("ewelinkOpenChannel").value), close_channel: Number($("ewelinkCloseChannel").value), pulse_seconds: Number($("pulseSeconds").value)};
-      try {
-        const result = await api("/api/ewelink/import/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-        await refreshAll();
-        $("ewelinkImportResult").classList.remove("show");
-        $("ewelinkImportStatus").textContent = `${result.name} imported. VisionGate now uses ${host ? "LAN with cloud fallback" : "cloud control"} on channels ${body.open_channel}/${body.close_channel}.`;
-        toast("eWeLink door configured");
-      } catch (error) { $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
-    };
-
-    $("enroll").onclick = () => {
-      enrolling = !enrolling;
-      $("videoWrap").classList.toggle("enrolling", enrolling);
-      $("enroll").textContent = enrolling ? "Cancel enrollment" : "Enroll identity";
-    };
-    $("feed").onclick = event => {
-      if (!enrolling || !selectedCameraId) return;
-      const box = event.currentTarget.getBoundingClientRect();
-      $("enrollmentX").value = (event.clientX - box.left) / box.width;
-      $("enrollmentY").value = (event.clientY - box.top) / box.height;
-      $("enrollmentName").value = "";
-      $("enrollmentDialog").showModal();
-      $("enrollmentName").focus();
-    };
-    $("enrollmentForm").onsubmit = async event => {
-      event.preventDefault();
-      try {
-        const profile = await api(`/api/cameras/${selectedCameraId}/whitelist`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({x: Number($("enrollmentX").value), y: Number($("enrollmentY").value), name: $("enrollmentName").value.trim()})});
-        $("enrollmentDialog").close();
-        enrolling = false;
-        $("videoWrap").classList.remove("enrolling");
-        $("enroll").textContent = "Enroll identity";
-        toast(`${profile.name} added as ${profile.label}`);
-        await refreshAll();
-      } catch (error) { toast(error.message); }
-    };
-
-    async function testDoor(action) {
-      const channel = action === "open" ? system.door.open_channel : system.door.close_channel;
-      if (!confirm(`Activate channel ${channel} to ${action} the door now?`)) return;
-      try {
-        await api("/api/door/test", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true, action})});
-        await refreshAll();
-        toast(`Door ${action} command completed`);
-      } catch (error) { await refreshAll(); toast(error.message); }
-    }
-    $("testOpen").onclick = () => testDoor("open");
-    $("testClose").onclick = () => testDoor("close");
-    $("doorOpenCard").onclick = () => testDoor("open");
-    $("doorCloseCard").onclick = () => testDoor("close");
-    $("clearEvents").onclick = async () => {
-      if (!confirm("Clear all saved activity?")) return;
-      try { await api("/api/events", {method: "DELETE"}); await refreshEvents(); }
-      catch (error) { toast(error.message); }
-    };
-
-    Promise.all([refreshAll(), loadNetwork()]);
-    setInterval(refresh, 2000);
-    setInterval(refreshEvents, 5000);
-  </script>
+  <script src="/dashboard.js" defer></script>
 </body>
 </html>

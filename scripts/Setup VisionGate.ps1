@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Install", "Update", "Check", "Plan")]
+    [ValidateSet("Install", "Update", "Check", "Plan", "SourceUpdate")]
     [string]$Action = "Install",
     [ValidateSet("Auto", "CPU", "CUDA")]
     [string]$Backend = "Auto"
@@ -28,10 +28,10 @@ function Invoke-NativeProbe {
     }
 }
 
-if ($Backend -eq "Auto" -and $env:VISIONGATE_BACKEND -in @("CPU", "CUDA")) {
+if ($Action -in @("Install", "Update", "Plan") -and $Backend -eq "Auto" -and $env:VISIONGATE_BACKEND -in @("CPU", "CUDA")) {
     $Backend = $env:VISIONGATE_BACKEND
 }
-if ($Backend -eq "Auto") {
+if ($Action -in @("Install", "Update", "Plan") -and $Backend -eq "Auto") {
     $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
     if ($nvidia) {
         $probe = Invoke-NativeProbe { & $nvidia.Source --query-gpu=name --format=csv,noheader }
@@ -85,9 +85,40 @@ function Find-Python311 {
 try {
     Set-Location -LiteralPath $root
 
+    if ($Action -eq "SourceUpdate") {
+        if (-not (Test-Path -LiteralPath (Join-Path $root ".git"))) {
+            Write-Host "Standalone copy detected; application files were not downloaded."
+            exit 0
+        }
+        $git = Get-Command git.exe -ErrorAction SilentlyContinue
+        $gitPath = if ($git) { $git.Source } else { $null }
+        $gitCandidates = @(
+            (Join-Path $env:ProgramFiles "Git\cmd\git.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "Git\cmd\git.exe"),
+            (Join-Path $env:LocalAppData "Programs\Git\cmd\git.exe")
+        )
+        if (-not $gitPath) {
+            $gitPath = $gitCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        }
+        if (-not $gitPath) {
+            $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if (-not $winget) { throw "Git is required for application updates and Windows Package Manager is unavailable" }
+            Write-Host "Installing Git for future VisionGate updates..." -ForegroundColor Cyan
+            & $winget.Source install --exact --id Git.Git --scope user --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) { throw "Git installation failed with exit code $LASTEXITCODE" }
+            $gitPath = $gitCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if (-not $gitPath) { throw "Git installed, but Windows has not made it available yet. Restart Windows, then run the updater again." }
+        }
+        Write-Host "Downloading VisionGate application updates..." -ForegroundColor Cyan
+        & $gitPath -C $root pull --ff-only
+        if ($LASTEXITCODE -ne 0) { throw "Application update failed with exit code $LASTEXITCODE" }
+        exit 0
+    }
+
     if ($Action -eq "Check") {
         if (-not (Test-Path -LiteralPath $venvPython)) { throw "VisionGate is not installed" }
-        Invoke-VisionGatePython @("-c", "import cv2, fastapi, lap, torch, torchvision, ultralytics, uvicorn, zeroconf; from Crypto.Cipher import AES; print('VisionGate is ready. Runtime:', 'CUDA - ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')")
+        Invoke-VisionGatePython @("-m", "pip", "check")
+        Invoke-VisionGatePython @("-c", "import sys; from importlib.util import find_spec; required=('auth','cv2','fastapi','lap','torch','torchvision','ultralytics','uvicorn','zeroconf','Crypto.Cipher'); missing=[name for name in required if find_spec(name) is None]; sys.exit('Missing packages: ' + ', '.join(missing)) if missing else print('VisionGate is ready.')")
         exit 0
     }
 
@@ -154,7 +185,7 @@ try {
     Invoke-VisionGatePython @("-c", "import torch; print('VisionGate installation complete. Runtime:', 'CUDA - ' + torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')")
     exit 0
 } catch {
-    Write-Host "" 
+    Write-Host ""
     Write-Host "VisionGate setup failed: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }

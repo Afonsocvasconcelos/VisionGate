@@ -23,6 +23,8 @@ if errorlevel 1 (
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%VISIONGATE_SETUP%" -Action Install || goto :failed
 )
 
+"%VISIONGATE_PYTHON%" auth.py --ensure || goto :failed
+
 powershell.exe -NoProfile -Command "$rule=Get-NetFirewallRule -DisplayName 'VisionGate' -ErrorAction SilentlyContinue | Where-Object Enabled -eq 'True'; if($rule){exit 0}else{exit 1}" >nul 2>&1
 if errorlevel 1 (
     echo Windows will ask once for permission to allow VisionGate on your private network.

@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -18,9 +19,17 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from auth import AuthManager, TooManyAttempts
 from core import (
     AccessGate,
     Camera,
@@ -48,6 +57,8 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("visiongate")
+AUTH = AuthManager.from_environment()
+SESSION_COOKIE = "vg"
 
 
 def _number(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -212,6 +223,21 @@ class DoorController:
         self._auto_close_timer: threading.Timer | None = None
         self.last_event = "Waiting for an approved target"
         self.last_error = ""
+        self._state = str(database.settings().get("door_last_state", ""))
+        if self._state not in {"open", "closed"}:
+            recent_command = next(
+                (
+                    event.kind
+                    for event in database.events(1000)
+                    if event.kind in {"door_open", "door_close"}
+                ),
+                "",
+            )
+            self._state = {"door_open": "open", "door_close": "closed"}.get(
+                recent_command, "unknown"
+            )
+            if self._state != "unknown":
+                database.update_settings({"door_last_state": self._state})
         self._validate(config)
 
     @staticmethod
@@ -346,6 +372,7 @@ class DoorController:
     def status(self) -> dict:
         with self._guard:
             config = self._config
+            state = self._state
             auto_close_armed = self._auto_close_armed
             auto_close_remaining = (
                 max(
@@ -367,6 +394,7 @@ class DoorController:
             "auto_close_seconds": config.auto_close_seconds,
             "auto_close_armed": auto_close_armed,
             "auto_close_remaining": auto_close_remaining,
+            "state": state,
             "last_event": self.last_event,
             "last_error": self.last_error,
         }
@@ -494,6 +522,10 @@ class DoorController:
         failure = None
         try:
             self._send(config, channel, "on")
+            state = "open" if action == "open" else "closed"
+            with self._guard:
+                self._state = state
+            self.database.update_settings({"door_last_state": state})
             self.last_event = f"Door {action} command sent for {reason}"
             self.last_error = ""
             self._record(f"door_{action}", self.last_event, camera, match)
@@ -838,9 +870,7 @@ class VisionSystem:
                     x1, y1, x2, y2 = track["box"]
                     matched = track.get("match")
                     color = (61, 214, 140) if matched else (234, 177, 66)
-                    text = f'{track["label"]} #{track["id"]} {track["confidence"]:.0%}'
-                    if matched:
-                        text += f' | {matched} {track["similarity"]:.2f}'
+                    text = matched or track["label"]
                     cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
                     cv2.rectangle(
                         annotated,
@@ -1074,6 +1104,11 @@ EWELINK_CLOUD = EWeLinkCloud()
 EWELINK_IMPORTS = ImportSessions()
 
 
+class LoginPayload(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
 class Enrollment(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
@@ -1202,6 +1237,99 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="VisionGate", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
+CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    )
+)
+PUBLIC_PATHS = {
+    "/health",
+    "/login",
+    "/logo.png",
+    "/login.js",
+    "/visiongate.css",
+    "/api/auth/login",
+    "/api/ewelink/oauth/callback",
+}
+allowed_hosts = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "testserver",
+    "*.local",
+    socket.gethostname(),
+    socket.getfqdn(),
+    *local_ipv4_addresses(),
+    *(host.strip() for host in os.getenv("VISIONGATE_ALLOWED_HOSTS", "").split(",")),
+}
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(filter(None, allowed_hosts)))
+
+
+def _same_origin(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return False
+    supplied = urlsplit(origin)
+    expected = request.url
+    supplied_port = supplied.port or (443 if supplied.scheme == "https" else 80)
+    expected_port = expected.port or (443 if expected.scheme == "https" else 80)
+    return (
+        supplied.scheme,
+        supplied.hostname,
+        supplied_port,
+    ) == (expected.scheme, expected.hostname, expected_port)
+
+
+def _secure_cookie(request: Request) -> bool:
+    return request.url.scheme == "https" or os.getenv("VISIONGATE_SECURE_COOKIES") == "1"
+
+
+@app.middleware("http")
+async def secure_requests(request: Request, call_next):
+    token = request.cookies.get(SESSION_COOKIE)
+    session = AUTH.session(token)
+    public = request.url.path in PUBLIC_PATHS
+    if not public and not session:
+        response = (
+            RedirectResponse("/login", status_code=303)
+            if request.url.path == "/"
+            else JSONResponse({"detail": "Authentication required"}, status_code=401)
+        )
+    elif (
+        session
+        and request.method not in {"GET", "HEAD", "OPTIONS"}
+        and not public
+        and (not _same_origin(request) or not AUTH.valid_csrf(token, request.headers.get("x-csrf-token")))
+    ):
+        response = JSONResponse({"detail": "Invalid security token"}, status_code=403)
+    else:
+        request.state.session = session
+        response = await call_next(request)
+    response.headers.update(
+        {
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        }
+    )
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
 def _local_request(request: Request) -> bool:
     try:
         return bool(request.client and ipaddress.ip_address(request.client.host).is_loopback)
@@ -1217,6 +1345,66 @@ def _require_local_login(request: Request) -> None:
         )
 
 
+@app.get("/login", include_in_schema=False)
+def login_page(request: Request):
+    if request.state.session:
+        return RedirectResponse("/", status_code=303)
+    return FileResponse(ROOT / "static" / "login.html")
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginPayload, request: Request):
+    if not AUTH.configured:
+        raise HTTPException(503, "Login is not configured. Run Configure Login.bat on the VisionGate PC.")
+    if not _same_origin(request):
+        raise HTTPException(403, "Invalid request origin")
+    client = request.client.host if request.client else "unknown"
+    try:
+        result = AUTH.login(payload.username, payload.password, client)
+    except TooManyAttempts as error:
+        raise HTTPException(
+            429,
+            f"Too many login attempts. Try again in {error.retry_after} seconds.",
+            headers={"Retry-After": str(error.retry_after)},
+        ) from error
+    if not result:
+        raise HTTPException(401, "Invalid username or password")
+    token, csrf = result
+    response = JSONResponse({"username": AUTH.username, "csrf_token": csrf})
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=AUTH.session_lifetime_seconds,
+        path="/",
+        secure=_secure_cookie(request),
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
+@app.get("/api/auth/session")
+def auth_session(request: Request):
+    return {
+        "username": request.state.session.username,
+        "csrf_token": request.state.session.csrf,
+    }
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    AUTH.logout(request.cookies.get(SESSION_COOKIE))
+    response = JSONResponse({"logged_out": True})
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        secure=_secure_cookie(request),
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -1230,6 +1418,21 @@ def dashboard():
 @app.get("/logo.png", include_in_schema=False)
 def logo():
     return FileResponse(ROOT / "media" / "logo.png", media_type="image/png")
+
+
+@app.get("/visiongate.css", include_in_schema=False)
+def stylesheet():
+    return FileResponse(ROOT / "static" / "visiongate.css", media_type="text/css")
+
+
+@app.get("/login.js", include_in_schema=False)
+def login_script():
+    return FileResponse(ROOT / "static" / "login.js", media_type="text/javascript")
+
+
+@app.get("/dashboard.js", include_in_schema=False)
+def dashboard_script():
+    return FileResponse(ROOT / "static" / "dashboard.js", media_type="text/javascript")
 
 
 @app.get("/api/network")
@@ -1268,7 +1471,12 @@ def system_status():
 @app.get("/api/config")
 def configuration():
     settings = DATABASE.settings()
-    for key in ("ewelink_cloud_token", "ewelink_cloud_app_id", "ewelink_cloud_region"):
+    for key in (
+        "ewelink_cloud_token",
+        "ewelink_cloud_app_id",
+        "ewelink_cloud_region",
+        "door_last_state",
+    ):
         settings.pop(key, None)
     return {
         "cameras": [asdict(camera) for camera in DATABASE.cameras()],
@@ -1361,10 +1569,8 @@ def ewelink_oauth_callback(
         raise HTTPException(400, str(session_error)) from session_error
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'><title>eWeLink connected</title>"
-        "<body style='font:16px system-ui;background:#111720;color:#edf4fb;padding:40px'>"
         "<h1>eWeLink authorization received</h1>"
         "<p>You can close this window and return to VisionGate.</p>"
-        "<script>setTimeout(()=>window.close(),1500)</script></body>"
     )
 
 

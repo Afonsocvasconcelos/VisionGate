@@ -8,7 +8,7 @@ SQLite stores camera settings and credentials, recognition settings, whitelist e
 
 ## Install
 
-Clone or download the repository, then double-click **Install VisionGate.bat**. It installs Python 3.11 when needed, creates an isolated environment, installs every dependency and model, creates a desktop shortcut, and starts VisionGate. Existing settings and data are preserved if the installer is run again.
+Clone or download the repository, then double-click **Install VisionGate.bat**. It installs Python 3.11 when needed, creates an isolated environment, installs every dependency and model, creates a desktop shortcut, and starts VisionGate. On the first launch it asks you to choose the dashboard username and password. Existing settings and data are preserved if the installer is run again.
 
 The installer automatically uses NVIDIA CUDA when a working NVIDIA GPU is present. PCs with Intel/AMD integrated graphics or no dedicated GPU receive the official CPU-only PyTorch build and run without GPU acceleration. On a CPU-only PC, choose **YOLO11 Nano** in Recognition settings if more speed is needed. To force CPU mode even on an NVIDIA PC, run this from Command Prompt before installing:
 
@@ -27,7 +27,7 @@ To check an existing installation without starting the server:
 
 ## Update
 
-Double-click **Update VisionGate.bat**. It upgrades compatible dependencies, repairs the selected CPU/CUDA runtime, and never removes `data`, `.env`, camera settings, events, or whitelist profiles. When VisionGate is distributed as a Git checkout, the same file also downloads application updates with a safe fast-forward pull; standalone copies still receive dependency updates.
+Double-click **Update VisionGate.bat**. It upgrades compatible dependencies, repairs the selected CPU/CUDA runtime, and never removes `data`, `.env`, camera settings, events, or whitelist profiles. For a Git checkout, it installs Git through Windows Package Manager when needed and downloads application updates with a safe fast-forward pull; standalone copies still receive dependency updates.
 
 ## Connect the SONOFF 4CH Pro R2
 
@@ -43,9 +43,11 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 
 Set **Auto-close delay** in the same Door settings panel. The default is 5 seconds after the last authorized person or vehicle disappears; set it to `0` to disable automatic closing.
 
+The dashboard's **Last known** door state is the latest successful command saved by VisionGate and survives restarts. The 4CH Pro R2's momentary open/close relays cannot sense physical door position; use a contact sensor if the app must detect movement made outside VisionGate.
+
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
-For credential safety, importer sign-in is enabled only at `http://127.0.0.1:8000` on the VisionGate PC. Ordinary viewing and configuration are available across the trusted LAN. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
+For credential safety, eWeLink importer sign-in is enabled only at `http://127.0.0.1:8000` on the VisionGate PC. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
 
 ## Run
 
@@ -53,13 +55,19 @@ Double-click **Launch VisionGate.bat**. It checks the installation, requests a o
 
 The console prints the current `http://192.168.x.x:8000` address for phones and other local devices.
 
+The responsive interface contains the live camera, door controls, authorized identities, and settings. Diagnostics and event history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
+
 The equivalent manual command is:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, and door details. Use **Test connection** in the camera editor to validate an RTSP address before saving it. Authentication is currently disabled, so keep port 8000 on a trusted private LAN and never expose it to the internet.
+On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, and door details. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
+
+The dashboard login cannot be changed from the website. Double-click **Configure Login.bat** on the VisionGate PC, choose a new username/password, then restart VisionGate. Only the username and a salted scrypt password hash are kept in `.env`; the password itself is never stored. Sessions are server-side, expire after 30 idle minutes or 8 total hours, and use HttpOnly/SameSite cookies, CSRF validation, login throttling, and restrictive browser security headers.
+
+Keep VisionGate on a trusted private LAN and never expose port 8000 directly to the internet. For untrusted networks, put it behind HTTPS and set `VISIONGATE_SECURE_COOKIES=1` in `.env`; plain HTTP cannot protect credentials from a device already able to intercept that network.
 
 ## Enroll and calibrate
 
@@ -76,9 +84,9 @@ Older profiles remain usable as legacy descriptors. Remove and then re-enroll pr
 ```powershell
 .\Launch VisionGate.bat --check
 .\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe -m py_compile app.py core.py ewelink_cloud.py
+.\.venv\Scripts\python.exe -m py_compile app.py auth.py core.py ewelink_cloud.py
 ```
 
-`.env.example` contains optional first-run defaults. Later changes belong in the app. Tracking follows the [Ultralytics tracking API](https://docs.ultralytics.com/modes/track/).
+`.env.example` contains login/session options and optional first-run defaults. Device settings belong in the app; login changes stay file-only through **Configure Login.bat**. Tracking follows the [Ultralytics tracking API](https://docs.ultralytics.com/modes/track/).
 
 For repository safety, `.env`, `info.md`, `data/`, model weights, virtual environments, databases, and editor caches are ignored. Never commit real RTSP credentials, eWeLink device keys, access tokens, whitelist embeddings, or event history. See [SECURITY.md](SECURITY.md) before making a repository public.

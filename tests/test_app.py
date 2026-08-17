@@ -13,8 +13,14 @@ from pathlib import Path
 import numpy as np
 
 os.environ["DISABLE_VISION"] = "1"
+from auth import hash_password
 
-from fastapi.testclient import TestClient
+os.environ["VISIONGATE_USERNAME"] = "owner"
+os.environ["VISIONGATE_PASSWORD_HASH"] = hash_password(
+    "correct horse battery staple", n=1024
+)
+
+from fastapi.testclient import TestClient as BaseTestClient
 from unittest.mock import patch
 
 import app as app_module
@@ -28,6 +34,23 @@ from app import (
     spatial_layout_descriptor,
 )
 from core import Database, Match, Profile
+
+
+class TestClient(BaseTestClient):
+    def __enter__(self):
+        client = super().__enter__()
+        origin = str(self.base_url).rstrip("/")
+        login = self.post(
+            "/api/auth/login",
+            json={"username": "owner", "password": "correct horse battery staple"},
+            headers={"Origin": origin},
+        )
+        if login.status_code != 200:
+            raise AssertionError(f"Test login failed: {login.text}")
+        self.headers.update(
+            {"Origin": origin, "X-CSRF-Token": login.json()["csrf_token"]}
+        )
+        return client
 
 
 class FakeEWeLink(BaseHTTPRequestHandler):
@@ -111,6 +134,18 @@ class DoorControllerTests(unittest.TestCase):
                 [event.kind for event in database.events()],
                 ["door_close", "door_open"],
             )
+            self.assertEqual(controller.status()["state"], "closed")
+            self.assertEqual(DoorController(config, database).status()["state"], "closed")
+
+    def test_existing_door_events_seed_last_known_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "door-state.db")
+            database.add_event("door_close", "Door close command sent")
+            database.add_event("door_open", "Door open command sent")
+
+            controller = DoorController(CONFIG, database)
+            self.assertEqual(controller.status()["state"], "open")
+            self.assertEqual(database.settings()["door_last_state"], "open")
 
     def test_uncertain_turn_on_still_sends_safety_turn_off(self):
         FakeEWeLink.requests = []
@@ -331,6 +366,104 @@ class AppearanceTests(unittest.TestCase):
 
 
 class WebAccessTests(unittest.TestCase):
+    def test_dashboard_and_apis_require_a_login(self):
+        with BaseTestClient(app, follow_redirects=False) as client:
+            dashboard = client.get("/")
+            status = client.get("/api/status")
+            login = client.get("/login")
+
+        self.assertEqual(dashboard.status_code, 303)
+        self.assertEqual(dashboard.headers["location"], "/login")
+        self.assertEqual(status.status_code, 401)
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("Sign in to VisionGate", login.text)
+
+    def test_login_uses_a_secure_server_side_session_and_csrf_token(self):
+        with BaseTestClient(app, base_url="https://testserver") as client:
+            login = client.post(
+                "/api/auth/login",
+                json={"username": "owner", "password": "correct horse battery staple"},
+                headers={"Origin": "https://testserver"},
+            )
+            csrf = login.json()["csrf_token"]
+            status = client.get("/api/status")
+            rejected = client.delete("/api/events")
+            logout = client.post(
+                "/api/auth/logout",
+                headers={"Origin": "https://testserver", "X-CSRF-Token": csrf},
+            )
+            after_logout = client.get("/api/status")
+
+        cookie = login.headers["set-cookie"].lower()
+        self.assertEqual(login.status_code, 200)
+        self.assertIn("httponly", cookie)
+        self.assertIn("secure", cookie)
+        self.assertIn("samesite=strict", cookie)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(logout.status_code, 200)
+        self.assertEqual(after_logout.status_code, 401)
+
+    def test_login_rejects_bad_credentials_with_a_generic_message(self):
+        with BaseTestClient(app) as client:
+            response = client.post(
+                "/api/auth/login",
+                json={"username": "owner", "password": "wrong password"},
+                headers={"Origin": "http://testserver"},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Invalid username or password")
+        self.assertNotIn("owner", response.text)
+
+    def test_pages_include_browser_security_headers(self):
+        with BaseTestClient(app) as client:
+            response = client.get("/login")
+
+        self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+        self.assertNotIn("sha256-", response.headers["content-security-policy"])
+        self.assertNotIn("unsafe-inline", response.headers["content-security-policy"])
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+
+    def test_login_and_dashboard_share_a_public_responsive_design_system(self):
+        with BaseTestClient(app) as public_client:
+            login = public_client.get("/login")
+            stylesheet = public_client.get("/visiongate.css")
+            login_script = public_client.get("/login.js")
+        with TestClient(app) as private_client:
+            dashboard = private_client.get("/")
+            dashboard_script = private_client.get("/dashboard.js")
+
+        self.assertEqual(stylesheet.status_code, 200)
+        self.assertEqual(login_script.status_code, 200)
+        self.assertEqual(dashboard_script.status_code, 200)
+        self.assertIn('href="/visiongate.css"', login.text)
+        self.assertIn('href="/visiongate.css"', dashboard.text)
+        self.assertIn('src="/login.js"', login.text)
+        self.assertIn('src="/dashboard.js"', dashboard.text)
+        self.assertNotIn("<style>", login.text)
+        self.assertNotIn("<style>", dashboard.text)
+        self.assertIn("--tap: 44px", stylesheet.text)
+        self.assertIn("@media (max-width: 760px)", stylesheet.text)
+        self.assertIn("prefers-reduced-motion", stylesheet.text)
+        self.assertIn('class="topbar"', dashboard.text)
+        self.assertIn('id="liveCamera"', dashboard.text)
+
+    def test_everyday_ui_contains_only_operational_controls(self):
+        with BaseTestClient(app) as public_client:
+            login = public_client.get("/login").text
+            stylesheet = public_client.get("/visiongate.css").text
+        with TestClient(app) as private_client:
+            dashboard = private_client.get("/").text
+
+        self.assertIn('id="doorState"', dashboard)
+        self.assertNotIn('id="tracks"', dashboard)
+        self.assertNotIn('id="activity"', dashboard)
+        self.assertNotIn('id="threshold"', dashboard)
+        self.assertNotIn(".door-button:first-child", stylesheet)
+        self.assertNotIn("auth-story", login)
+
     def test_visiongate_logo_and_lan_access_information_are_available(self):
         with patch("app.local_ipv4_addresses", return_value=["192.168.2.197"]):
             with TestClient(app) as client:
@@ -400,7 +533,7 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 502)
         self.assertIn("rejected", raised.exception.detail)
 
-    def test_dashboard_and_status_are_available_without_login(self):
+    def test_dashboard_and_status_are_available_after_login(self):
         with TestClient(app) as client:
             self.assertEqual(client.get("/").status_code, 200)
             self.assertEqual(client.get("/api/status").status_code, 200)
@@ -584,6 +717,8 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn("No developer account required", dashboard)
         self.assertIn("Device IP (optional)", dashboard)
         self.assertIn("The account password is never saved", dashboard)
+        self.assertIn('id="logout"', dashboard)
+        self.assertIn("Configure Login.bat", dashboard)
 
     def test_ewelink_password_import_does_not_store_or_return_credentials(self):
         cloud_devices = [
