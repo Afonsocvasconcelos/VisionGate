@@ -68,6 +68,26 @@ def cloud_switch_request(
     )
 
 
+def cloud_status_request(
+    access_token: str, app_id: str, region: str, device_id: str
+) -> Request:
+    if region not in API_HOSTS:
+        raise ValueError("Select a valid eWeLink region")
+    if not access_token or not app_id:
+        raise ValueError("eWeLink cloud authorization is required")
+    if not re.fullmatch(r"[A-Za-z0-9]{6,32}", device_id):
+        raise ValueError("eWeLink device ID must contain 6-32 letters or numbers")
+    query = urlencode({"type": 1, "id": device_id, "params": "switches"})
+    return Request(
+        f"{API_HOSTS[region]}/v2/device/thing/status?{query}",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "X-CK-Appid": app_id,
+        },
+        method="GET",
+    )
+
+
 class EWeLinkCloud:
     @staticmethod
     def _signature(secret: str, message: bytes) -> str:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts" / "Setup VisionGate.ps1"
+PUBLIC_SETUP = ROOT / "scripts" / "Public Access.ps1"
 
 
 class InstallerTests(unittest.TestCase):
@@ -133,6 +134,112 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Git.Git", setup_script)
         self.assertIn("-Action SourceUpdate", updater)
         self.assertNotIn("git pull", updater)
+
+    def test_launcher_can_query_the_lan_address_without_cmd_quote_corruption(self):
+        launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+        address_line = next(
+            line
+            for line in launcher.splitlines()
+            if line.startswith('for /f "delims="') and "local_ipv4_addresses" in line
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "probe.bat"
+            probe.write_text(
+                "@echo off\n"
+                "setlocal\n"
+                f'cd /d "{ROOT}"\n'
+                'set "VISIONGATE_PYTHON=.venv\\Scripts\\python.exe"\n'
+                'set "VISIONGATE_LAN="\n'
+                f"{address_line}\n"
+                "if not defined VISIONGATE_LAN exit /b 9\n"
+                "echo %VISIONGATE_LAN%\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["cmd.exe", "/d", "/c", str(probe)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is not recognized", result.stdout + result.stderr)
+
+    def test_launcher_reuses_an_existing_healthy_server_before_starting_uvicorn(self):
+        launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+
+        self.assertIn("http://127.0.0.1:8000/health", launcher)
+        self.assertIn("VisionGate is already running", launcher)
+        self.assertLess(
+            launcher.index("http://127.0.0.1:8000/health"),
+            launcher.index("-m uvicorn"),
+        )
+
+    def test_public_access_plan_builds_an_https_reverse_proxy(self):
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PUBLIC_SETUP),
+                "-Action",
+                "Plan",
+                "-Domain",
+                "door.example.com",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(plan["public_url"], "https://door.example.com")
+        self.assertIn("reverse_proxy 127.0.0.1:8000", plan["caddyfile"])
+        self.assertIn("max_size 2MB", plan["caddyfile"])
+        self.assertIn("flush_interval -1", plan["caddyfile"])
+        self.assertNotIn("tls_insecure_skip_verify", plan["caddyfile"])
+
+    def test_public_access_rejects_a_domain_that_could_inject_caddy_config(self):
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PUBLIC_SETUP),
+                "-Action",
+                "Plan",
+                "-Domain",
+                "door.example.com { respond hacked }",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_launcher_starts_public_https_with_only_local_proxy_headers_trusted(self):
+        launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+
+        self.assertTrue((ROOT / "Configure Online Access.bat").exists())
+        self.assertIn(r"scripts\Public Access.ps1", launcher)
+        self.assertIn("-Action Start", launcher)
+        self.assertIn("--proxy-headers --forwarded-allow-ips 127.0.0.1", launcher)
+        self.assertNotIn('--forwarded-allow-ips "*"', launcher)
+
+    def test_updater_keeps_the_public_https_proxy_current(self):
+        updater = (ROOT / "Update VisionGate.bat").read_text(encoding="utf-8")
+
+        self.assertIn(r"scripts\Public Access.ps1", updater)
+        self.assertIn("-Action Update", updater)
 
 
 if __name__ == "__main__":

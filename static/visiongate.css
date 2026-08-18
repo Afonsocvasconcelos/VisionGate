@@ -19,6 +19,10 @@
   --shadow: 0 1px 2px rgba(18, 32, 45, .06);
 }
 
+:root[data-palette="blue"] { --teal: #2563a6; --teal-dark: #1d4f85; --teal-soft: #e8f1fa; }
+:root[data-palette="violet"] { --teal: #7152a6; --teal-dark: #5a4088; --teal-soft: #f0ebf8; }
+:root[data-palette="orange"] { --teal: #a65719; --teal-dark: #824313; --teal-soft: #faeee4; }
+
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { scroll-behavior: smooth; }
@@ -241,6 +245,7 @@ summary:focus-visible {
 .door-state[data-state="open"] { background: var(--amber-soft); color: var(--amber); }
 .door-state[data-state="busy"] { background: #eaf0f7; color: #315d8c; }
 .door-timing { margin: 14px 0 0; color: var(--amber); font-size: 13px; }
+.door-check { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .door-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 18px; }
 .door-button {
   min-height: 58px;
@@ -318,6 +323,18 @@ input:hover,
 select:hover { border-color: #9eabb5; }
 input:focus,
 select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(8, 124, 113, .12); }
+input[type="file"] { padding: 5px; }
+input[type="file"]::file-selector-button {
+  min-height: 34px;
+  margin-right: 10px;
+  padding: 6px 11px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--teal-soft);
+  color: var(--teal-dark);
+  font-weight: 650;
+  cursor: pointer;
+}
 dialog {
   width: min(760px, calc(100vw - 28px));
   max-height: 92dvh;
@@ -363,7 +380,7 @@ dialog > form { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; max
   color: #52616e;
   font-size: 12px;
 }
-.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 4px; border-radius: 10px; background: #edf1f3; }
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 4px; border-radius: 10px; background: #edf1f3; }
 .tab { min-height: var(--tap); padding: 8px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 700; }
 .tab.active { background: white; color: var(--navy); box-shadow: var(--shadow); }
 .tab-panel { display: none; padding-top: 18px; }

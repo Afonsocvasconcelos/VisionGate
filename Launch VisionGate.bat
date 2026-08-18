@@ -5,6 +5,7 @@ title VisionGate
 
 set "VISIONGATE_PYTHON=.venv\Scripts\python.exe"
 set "VISIONGATE_SETUP=%~dp0scripts\Setup VisionGate.ps1"
+set "VISIONGATE_PUBLIC_SETUP=%~dp0scripts\Public Access.ps1"
 
 if /i "%~1"=="--check" (
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%VISIONGATE_SETUP%" -Action Check
@@ -23,6 +24,31 @@ if errorlevel 1 (
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%VISIONGATE_SETUP%" -Action Install || goto :failed
 )
 
+set "VISIONGATE_URL=http://127.0.0.1:8000"
+for /f "delims=" %%I in ('%VISIONGATE_PYTHON% -c "from dotenv import load_dotenv; load_dotenv(); import os; print(os.getenv('VISIONGATE_PUBLIC_HOST', ''))"') do set "VISIONGATE_PUBLIC_HOST=%%I"
+if defined VISIONGATE_PUBLIC_HOST (
+    set "VISIONGATE_URL=https://%VISIONGATE_PUBLIC_HOST%"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%VISIONGATE_PUBLIC_SETUP%" -Action Start >nul 2>&1
+    if errorlevel 1 echo WARNING: Public HTTPS could not start. Local access will still work.
+)
+
+powershell.exe -NoProfile -Command "$ProgressPreference='SilentlyContinue'; try { $health=Invoke-RestMethod -Uri 'http://127.0.0.1:8000/health' -TimeoutSec 2; if($health.ok){exit 0} } catch {}; exit 1" >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo VisionGate is already running at %VISIONGATE_URL%
+    start "VisionGate Browser" /min powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process '%VISIONGATE_URL%'"
+    exit /b 0
+)
+
+powershell.exe -NoProfile -Command "if(Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue){exit 0}else{exit 1}" >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo Port 8000 is already used by another application.
+    echo Close that application, then launch VisionGate again.
+    pause
+    exit /b 1
+)
+
 "%VISIONGATE_PYTHON%" auth.py --ensure || goto :failed
 
 powershell.exe -NoProfile -Command "$rule=Get-NetFirewallRule -DisplayName 'VisionGate' -ErrorAction SilentlyContinue | Where-Object Enabled -eq 'True'; if($rule){exit 0}else{exit 1}" >nul 2>&1
@@ -33,16 +59,17 @@ if errorlevel 1 (
 )
 
 set "VISIONGATE_LAN="
-for /f "delims=" %%I in ('"%VISIONGATE_PYTHON%" -c "from core import local_ipv4_addresses; a=local_ipv4_addresses(); print(a[0] if a else '')"') do set "VISIONGATE_LAN=%%I"
+for /f "delims=" %%I in ('%VISIONGATE_PYTHON% -c "from core import local_ipv4_addresses; a=local_ipv4_addresses(); print(a[0] if a else '')"') do set "VISIONGATE_LAN=%%I"
 
 echo.
 echo VisionGate is starting at http://127.0.0.1:8000
 if defined VISIONGATE_LAN echo Other devices can open http://%VISIONGATE_LAN%:8000
+if defined VISIONGATE_PUBLIC_HOST echo Public access: %VISIONGATE_URL%
 echo Close this window to stop the server.
 echo.
 
-start "VisionGate Browser" /min powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://127.0.0.1:8000'"
-"%VISIONGATE_PYTHON%" -m uvicorn app:app --host 0.0.0.0 --port 8000 --no-use-colors
+start "VisionGate Browser" /min powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process '%VISIONGATE_URL%'"
+"%VISIONGATE_PYTHON%" -m uvicorn app:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-use-colors
 
 echo.
 echo VisionGate stopped.

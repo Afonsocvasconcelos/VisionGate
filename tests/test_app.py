@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
+import cv2
 
 os.environ["DISABLE_VISION"] = "1"
 from auth import hash_password
@@ -30,8 +31,10 @@ from app import (
     DoorController,
     VisionManager,
     _config,
+    detection_caption,
     app,
     spatial_layout_descriptor,
+    vision_runtime,
 )
 from core import Database, Match, Profile
 
@@ -146,6 +149,54 @@ class DoorControllerTests(unittest.TestCase):
             controller = DoorController(CONFIG, database)
             self.assertEqual(controller.status()["state"], "open")
             self.assertEqual(database.settings()["door_last_state"], "open")
+
+    def test_relay_state_is_checked_on_start_and_every_minute(self):
+        config = replace(
+            CONFIG,
+            ewelink_host="127.0.0.1",
+            ewelink_device_id="1000abcd12",
+            ewelink_device_key="1234567890abcdef",
+            ewelink_cloud_token="",
+            ewelink_cloud_app_id="",
+            ewelink_cloud_region="",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DoorController(config, Database(Path(directory) / "poll.db"))
+            controller.POLL_SECONDS = 0.02
+            with patch.object(
+                controller,
+                "_query_switches",
+                return_value={0: "on", 1: "off", 2: "off", 3: "off"},
+            ) as queried:
+                try:
+                    controller.start()
+                    deadline = time.time() + 1
+                    while queried.call_count < 2 and time.time() < deadline:
+                        time.sleep(0.01)
+                finally:
+                    controller.stop()
+
+            status = controller.status()
+            self.assertGreaterEqual(queried.call_count, 2)
+            self.assertEqual(status["state"], "open")
+            self.assertIsNotNone(status["last_state_check"])
+
+    def test_new_door_device_is_checked_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = DoorController(CONFIG, Database(Path(directory) / "new-door.db"))
+            new_config = replace(
+                CONFIG,
+                ewelink_host="127.0.0.1",
+                ewelink_device_id="1000abcd12",
+                ewelink_device_key="1234567890abcdef",
+                ewelink_cloud_token="",
+                ewelink_cloud_app_id="",
+                ewelink_cloud_region="",
+            )
+            with patch.object(controller, "refresh_state", return_value=True) as checked:
+                controller.update(new_config)
+
+            checked.assert_called_once_with()
 
     def test_uncertain_turn_on_still_sends_safety_turn_off(self):
         FakeEWeLink.requests = []
@@ -364,8 +415,63 @@ class AppearanceTests(unittest.TestCase):
 
         self.assertLess(similarity, 0)
 
+    def test_detection_caption_includes_model_confidence(self):
+        self.assertEqual(
+            detection_caption({"label": "car", "confidence": 0.876}), "car · 88%"
+        )
+        self.assertEqual(
+            detection_caption(
+                {"label": "person", "confidence": 0.912, "match": "Alice"}
+            ),
+            "Alice · 91%",
+        )
+
+    def test_auto_performance_mode_reduces_cpu_work_only(self):
+        config = replace(CONFIG, yolo_model="yolo11m.pt", yolo_imgsz=960)
+        self.assertEqual(vision_runtime(config, "cpu"), ("yolo11n.pt", 512, 2))
+        self.assertEqual(vision_runtime(config, "cuda:0"), ("yolo11m.pt", 960, 1))
+        self.assertEqual(
+            vision_runtime(replace(config, performance_mode="quality"), "cpu"),
+            ("yolo11m.pt", 960, 1),
+        )
+
 
 class WebAccessTests(unittest.TestCase):
+    def test_public_branding_and_private_brand_settings_are_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "branding.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+            manager.update_settings({"app_name": "Gate House", "brand_palette": "blue"})
+            with patch("app.DATABASE", database):
+                with BaseTestClient(app) as client:
+                    brand = client.get("/api/brand")
+            saved = database.settings()
+
+        self.assertEqual(brand.status_code, 200)
+        self.assertEqual(brand.json()["name"], "Gate House")
+        self.assertEqual(brand.json()["palette"], "blue")
+        self.assertEqual(saved["app_name"], "Gate House")
+
+    def test_custom_png_logo_can_be_uploaded_and_served(self):
+        image = np.zeros((48, 48, 4), np.uint8)
+        image[:, :] = (20, 120, 220, 255)
+        encoded = base64.b64encode(cv2.imencode(".png", image)[1]).decode()
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.DATA_DIR", Path(directory)
+        ):
+            with TestClient(app) as client:
+                uploaded = client.put(
+                    "/api/branding/logo",
+                    json={"image": f"data:image/png;base64,{encoded}"},
+                )
+                logo = client.get("/logo.png")
+
+        self.assertEqual(uploaded.status_code, 200)
+        self.assertEqual(logo.status_code, 200)
+        self.assertEqual(logo.headers["content-type"], "image/png")
+        self.assertTrue(logo.content.startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_dashboard_and_apis_require_a_login(self):
         with BaseTestClient(app, follow_redirects=False) as client:
             dashboard = client.get("/")
@@ -376,7 +482,7 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(dashboard.headers["location"], "/login")
         self.assertEqual(status.status_code, 401)
         self.assertEqual(login.status_code, 200)
-        self.assertIn("Sign in to VisionGate", login.text)
+        self.assertIn('id="title">Sign in', login.text)
 
     def test_login_uses_a_secure_server_side_session_and_csrf_token(self):
         with BaseTestClient(app, base_url="https://testserver") as client:
@@ -403,6 +509,35 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 403)
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(after_logout.status_code, 401)
+
+    def test_public_mode_keeps_direct_private_lan_login_usable(self):
+        with patch.dict(os.environ, {"VISIONGATE_SECURE_COOKIES": "1"}):
+            with BaseTestClient(
+                app, base_url="http://testserver", client=("192.168.1.50", 50000)
+            ) as client:
+                login = client.post(
+                    "/api/auth/login",
+                    json={
+                        "username": "owner",
+                        "password": "correct horse battery staple",
+                    },
+                    headers={"Origin": "http://testserver"},
+                )
+            with BaseTestClient(
+                app, base_url="http://testserver", client=("8.8.8.8", 50000)
+            ) as public_client:
+                public_login = public_client.post(
+                    "/api/auth/login",
+                    json={
+                        "username": "owner",
+                        "password": "correct horse battery staple",
+                    },
+                    headers={"Origin": "http://testserver"},
+                )
+
+        self.assertEqual(login.status_code, 200)
+        self.assertNotIn("secure", login.headers["set-cookie"].lower())
+        self.assertIn("secure", public_login.headers["set-cookie"].lower())
 
     def test_login_rejects_bad_credentials_with_a_generic_message(self):
         with BaseTestClient(app) as client:
@@ -711,6 +846,10 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn('id="enrollmentDialog"', dashboard)
         self.assertIn('id="testCameraConnection"', dashboard)
         self.assertIn('id="autoCloseSeconds"', dashboard)
+        self.assertIn('id="performanceMode"', dashboard)
+        self.assertIn('id="appName"', dashboard)
+        self.assertIn('id="brandPalette"', dashboard)
+        self.assertIn('id="appLogo"', dashboard)
         self.assertIn('id="ewelinkQrLogin"', dashboard)
         self.assertIn('id="ewelinkPasswordLogin"', dashboard)
         self.assertIn('id="ewelinkImportDevice"', dashboard)

@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 from ewelink_cloud import (
     EWeLinkCloud,
     ImportSessions,
+    cloud_status_request,
     cloud_switch_request,
     service_device_id,
 )
@@ -203,6 +204,18 @@ class EWeLinkCloudTests(unittest.TestCase):
                 "params": {"switches": [{"switch": "on", "outlet": 1}]},
             },
         )
+
+    def test_cloud_status_request_reads_all_relay_channels(self):
+        request = cloud_status_request(
+            "access-token", "app-id", "eu", "1000abcd12"
+        )
+
+        self.assertEqual(request.method, "GET")
+        self.assertEqual(
+            request.full_url,
+            "https://eu-apia.coolkit.cc/v2/device/thing/status?type=1&id=1000abcd12&params=switches",
+        )
+        self.assertEqual(request.headers["Authorization"], "Bearer access-token")
 
     def test_malformed_cloud_items_are_ignored(self):
         response = FakeResponse(

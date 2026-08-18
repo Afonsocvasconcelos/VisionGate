@@ -4,6 +4,13 @@ const showPassword = document.getElementById("showPassword");
 const submit = document.getElementById("submit");
 const message = document.getElementById("message");
 
+fetch("/api/brand").then(response => response.json()).then(brand => {
+  document.documentElement.dataset.palette = brand.palette;
+  document.querySelectorAll("[data-brand-name]").forEach(item => item.textContent = brand.name);
+  document.querySelectorAll("[data-brand-logo]").forEach(item => item.src = brand.logo);
+  document.title = `Sign in · ${brand.name}`;
+}).catch(() => {});
+
 showPassword.onclick = () => {
   const hidden = password.type === "password";
   password.type = hidden ? "text" : "password";

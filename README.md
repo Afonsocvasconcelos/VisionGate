@@ -10,7 +10,7 @@ SQLite stores camera settings and credentials, recognition settings, whitelist e
 
 Clone or download the repository, then double-click **Install VisionGate.bat**. It installs Python 3.11 when needed, creates an isolated environment, installs every dependency and model, creates a desktop shortcut, and starts VisionGate. On the first launch it asks you to choose the dashboard username and password. Existing settings and data are preserved if the installer is run again.
 
-The installer automatically uses NVIDIA CUDA when a working NVIDIA GPU is present. PCs with Intel/AMD integrated graphics or no dedicated GPU receive the official CPU-only PyTorch build and run without GPU acceleration. On a CPU-only PC, choose **YOLO11 Nano** in Recognition settings if more speed is needed. To force CPU mode even on an NVIDIA PC, run this from Command Prompt before installing:
+The installer automatically uses NVIDIA CUDA when a working NVIDIA GPU is present. PCs with Intel/AMD integrated graphics or no dedicated GPU receive the official CPU-only PyTorch build. **Automatic** performance mode uses YOLO11 Nano, a smaller input, and frame skipping on CPU-only PCs; choose **Full quality** only when the hardware can keep up. To force CPU mode even on an NVIDIA PC, run this from Command Prompt before installing:
 
 ```bat
 set VISIONGATE_BACKEND=CPU
@@ -43,7 +43,7 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 
 Set **Auto-close delay** in the same Door settings panel. The default is 5 seconds after the last authorized person or vehicle disappears; set it to `0` to disable automatic closing.
 
-The dashboard's **Last known** door state is the latest successful command saved by VisionGate and survives restarts. The 4CH Pro R2's momentary open/close relays cannot sense physical door position; use a contact sensor if the app must detect movement made outside VisionGate.
+The dashboard's **Last action** survives restarts. VisionGate checks the relay when it starts, when a new device is saved, and once per minute. The 4CH Pro R2's momentary open/close relays cannot sense physical door position; use a contact sensor if the app must detect movement made outside VisionGate.
 
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
@@ -63,17 +63,32 @@ The equivalent manual command is:
 .\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, and door details. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
+On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, door details, app name, logo, and color palette. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
 
 The dashboard login cannot be changed from the website. Double-click **Configure Login.bat** on the VisionGate PC, choose a new username/password, then restart VisionGate. Only the username and a salted scrypt password hash are kept in `.env`; the password itself is never stored. Sessions are server-side, expire after 30 idle minutes or 8 total hours, and use HttpOnly/SameSite cookies, CSRF validation, login throttling, and restrictive browser security headers.
 
-Keep VisionGate on a trusted private LAN and never expose port 8000 directly to the internet. For untrusted networks, put it behind HTTPS and set `VISIONGATE_SECURE_COOKIES=1` in `.env`; plain HTTP cannot protect credentials from a device already able to intercept that network.
+Keep VisionGate on a trusted private LAN and never expose port 8000 directly to the internet. Use the guided HTTPS setup below for internet access; plain HTTP cannot protect credentials from a device already able to intercept that network.
+
+## Access VisionGate over the internet
+
+Do not forward port `8000`. VisionGate includes a guided Caddy reverse-proxy setup so the public site uses HTTPS with automatic certificate renewal.
+
+You need a public domain or DDNS name pointed at your home public IP. A free DDNS hostname is sufficient. If the internet provider uses CGNAT and the router has no public IP, ordinary port forwarding cannot work; use a private VPN or managed tunnel instead.
+
+1. Double-click **Configure Online Access.bat** and enter the domain only, without `https://` or a path.
+2. Approve the Caddy installation and Windows Firewall request.
+3. Reserve this PC's local IP address in the router so it does not change.
+4. In the router's port-forwarding page, forward external TCP port `80` to this PC's port `80`, and external TCP port `443` to this PC's port `443`.
+5. Do not enable router DMZ mode and do not forward port `8000`.
+6. Close any running VisionGate command window, launch VisionGate again, and test the displayed `https://` URL from a phone with Wi-Fi disabled.
+
+Caddy obtains and renews the public TLS certificate and redirects HTTP to HTTPS. The launcher validates and starts Caddy automatically after setup. Rerun **Configure Online Access.bat** to change the domain. Use a unique login password and keep **Update VisionGate.bat** current because this endpoint controls a physical door.
 
 ## Enroll and calibrate
 
 1. Select a camera and wait for its camera and recognition states to become online.
 2. Select **Enroll identity**, then click inside a clear, fully visible tracked box and give it a unique name.
-3. Walk or drive past the camera and watch the similarity shown on green matches.
+3. Walk or drive past the camera and watch the model confidence shown on each detection box.
 4. Raise **Match threshold** if unknown targets match. Lower it carefully if genuine targets miss.
 5. Raise **Lookalike margin** when two similar whitelist entries are confused.
 

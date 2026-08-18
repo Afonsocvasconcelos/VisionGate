@@ -447,13 +447,13 @@ def select_track(
     )
 
 
-def ewelink_request(
+def _ewelink_lan_request(
     host: str,
     port: int,
     device_id: str,
     device_key: str,
-    channel: int,
-    state: str,
+    command: str,
+    data: dict,
     *,
     sequence: str | None = None,
     iv: bytes | None = None,
@@ -471,17 +471,9 @@ def ewelink_request(
         raise ValueError("eWeLink device ID must contain 6-32 letters or numbers")
     if not device_key or len(device_key) > 128:
         raise ValueError("eWeLink device key is required")
-    if channel not in {1, 2, 3, 4}:
-        raise ValueError("eWeLink channel must be between 1 and 4")
-    if state not in {"on", "off"}:
-        raise ValueError("eWeLink state must be on or off")
-
     from Crypto.Cipher import AES
 
-    plaintext = json.dumps(
-        {"switches": [{"switch": state, "outlet": channel - 1}]},
-        separators=(",", ":"),
-    ).encode()
+    plaintext = json.dumps(data, separators=(",", ":")).encode()
     padding = 16 - len(plaintext) % 16
     plaintext += bytes([padding]) * padding
     iv = iv or os.urandom(16)
@@ -500,11 +492,80 @@ def ewelink_request(
     }
     url_host = f"[{address}]" if address.version == 6 else str(address)
     return Request(
-        f"http://{url_host}:{port}/zeroconf/switches",
+        f"http://{url_host}:{port}/zeroconf/{command}",
         data=json.dumps(payload, separators=(",", ":")).encode(),
         headers={"Content-Type": "application/json;charset=UTF-8"},
         method="POST",
     )
+
+
+def ewelink_request(
+    host: str,
+    port: int,
+    device_id: str,
+    device_key: str,
+    channel: int,
+    state: str,
+    *,
+    sequence: str | None = None,
+    iv: bytes | None = None,
+) -> Request:
+    """Build an encrypted stock-firmware eWeLink LAN command."""
+    if channel not in {1, 2, 3, 4}:
+        raise ValueError("eWeLink channel must be between 1 and 4")
+    if state not in {"on", "off"}:
+        raise ValueError("eWeLink state must be on or off")
+    return _ewelink_lan_request(
+        host,
+        port,
+        device_id,
+        device_key,
+        "switches",
+        {"switches": [{"switch": state, "outlet": channel - 1}]},
+        sequence=sequence,
+        iv=iv,
+    )
+
+
+def ewelink_info_request(
+    host: str,
+    port: int,
+    device_id: str,
+    device_key: str,
+    *,
+    sequence: str | None = None,
+    iv: bytes | None = None,
+) -> Request:
+    """Build an encrypted stock-firmware relay status request."""
+    return _ewelink_lan_request(
+        host, port, device_id, device_key, "info", {}, sequence=sequence, iv=iv
+    )
+
+
+def ewelink_response_data(payload: dict, device_key: str) -> dict:
+    """Decrypt the data object returned by stock eWeLink LAN firmware."""
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return data
+    if not payload.get("encrypt") or not isinstance(data, str):
+        raise ValueError("eWeLink returned invalid relay data")
+    try:
+        from Crypto.Cipher import AES
+
+        iv = base64.b64decode(payload["iv"], validate=True)
+        encrypted = base64.b64decode(data, validate=True)
+        plaintext = AES.new(
+            hashlib.md5(device_key.encode()).digest(), AES.MODE_CBC, iv
+        ).decrypt(encrypted)
+        padding = plaintext[-1]
+        if padding < 1 or padding > 16 or plaintext[-padding:] != bytes([padding]) * padding:
+            raise ValueError
+        decoded = json.loads(plaintext[:-padding])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("eWeLink returned invalid relay data") from error
+    if not isinstance(decoded, dict):
+        raise ValueError("eWeLink returned invalid relay data")
+    return decoded
 
 
 def rtsp_url_from_text(text: str) -> str:

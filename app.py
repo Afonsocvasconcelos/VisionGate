@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import ipaddress
 import json
 import logging
@@ -37,7 +39,9 @@ from core import (
     Match,
     best_match,
     camera_stream_url,
+    ewelink_info_request,
     ewelink_request,
+    ewelink_response_data,
     local_ipv4_addresses,
     reid_eligible,
     reid_regions,
@@ -49,6 +53,7 @@ from ewelink_cloud import (
     EWeLinkCloudError,
     ImportSessions,
     add_lan_addresses,
+    cloud_status_request,
     cloud_switch_request,
 )
 
@@ -70,7 +75,10 @@ def _number(name: str, default: float, minimum: float, maximum: float) -> float:
 
 DATA_DIR = Path(os.getenv("DATA_DIR", ROOT / "data")).resolve()
 DEFAULT_SETTINGS = {
-    "yolo_model": os.getenv("YOLO_MODEL", "yolo11s.pt").strip(),
+    "app_name": "VisionGate",
+    "brand_palette": "teal",
+    "performance_mode": "auto",
+    "yolo_model": os.getenv("YOLO_MODEL", "yolo11n.pt").strip(),
     "yolo_imgsz": int(_number("YOLO_IMGSZ", 640, 320, 1280)),
     "detection_confidence": _number("DETECTION_CONFIDENCE", 0.35, 0.05, 0.95),
     "embed_every": int(_number("EMBED_EVERY", 5, 1, 60)),
@@ -97,6 +105,7 @@ DEFAULT_SETTINGS = {
 @dataclass(frozen=True, slots=True)
 class Config:
     data_dir: Path
+    performance_mode: str
     yolo_model: str
     yolo_imgsz: int
     confidence: float
@@ -124,6 +133,7 @@ class Config:
 def _config(settings: dict) -> Config:
     return Config(
         data_dir=DATA_DIR,
+        performance_mode=str(settings["performance_mode"]),
         yolo_model=str(settings["yolo_model"]),
         yolo_imgsz=int(settings["yolo_imgsz"]),
         confidence=float(settings["detection_confidence"]),
@@ -212,6 +222,8 @@ if not DATABASE.cameras():
 
 
 class DoorController:
+    POLL_SECONDS = 60
+
     def __init__(self, config: Config, database: Database):
         self.database = database
         self._busy = threading.Lock()
@@ -221,10 +233,14 @@ class DoorController:
         self._last_authorized_seen = float("-inf")
         self._auto_close_armed = False
         self._auto_close_timer: threading.Timer | None = None
+        self._poll_stop = threading.Event()
+        self._poll_thread: threading.Thread | None = None
+        self._last_state_check: float | None = None
+        self._state_check_error = ""
         self.last_event = "Waiting for an approved target"
         self.last_error = ""
         self._state = str(database.settings().get("door_last_state", ""))
-        if self._state not in {"open", "closed"}:
+        if self._state not in {"open", "closed", "unknown"}:
             recent_command = next(
                 (
                     event.kind
@@ -295,12 +311,33 @@ class DoorController:
     def update(self, config: Config) -> None:
         self._validate(config)
         with self._guard:
+            old = self._config
             self._config = config
             if self._auto_close_armed:
                 self._cancel_auto_close_locked()
                 if config.auto_close_seconds:
                     self._auto_close_armed = True
                     self._schedule_auto_close_locked()
+            target_changed = self._target(old) != self._target(config)
+            if target_changed:
+                self._state = "unknown"
+                self.database.update_settings({"door_last_state": "unknown"})
+        if target_changed and self._configured(config):
+            self.refresh_state()
+
+    @staticmethod
+    def _target(config: Config) -> tuple:
+        return (
+            config.ewelink_host,
+            config.ewelink_port,
+            config.ewelink_device_id,
+            config.ewelink_device_key,
+            config.ewelink_cloud_token,
+            config.ewelink_cloud_app_id,
+            config.ewelink_cloud_region,
+            config.ewelink_open_channel,
+            config.ewelink_close_channel,
+        )
 
     def _cancel_auto_close_locked(self) -> None:
         if self._auto_close_timer:
@@ -356,8 +393,28 @@ class DoorController:
         with self._guard:
             self._last_authorized_seen = time.monotonic()
 
-    def stop(self) -> None:
+    def start(self) -> None:
         with self._guard:
+            if self._poll_thread and self._poll_thread.is_alive():
+                return
+            self._poll_stop.clear()
+            self._poll_thread = threading.Thread(
+                target=self._poll, daemon=True, name="door-state"
+            )
+            self._poll_thread.start()
+
+    def _poll(self) -> None:
+        while not self._poll_stop.is_set():
+            self.refresh_state()
+            self._poll_stop.wait(self.POLL_SECONDS)
+
+    def stop(self) -> None:
+        self._poll_stop.set()
+        thread = self._poll_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        with self._guard:
+            self._poll_thread = None
             self._cancel_auto_close_locked()
 
     @property
@@ -373,6 +430,8 @@ class DoorController:
         with self._guard:
             config = self._config
             state = self._state
+            last_state_check = self._last_state_check
+            state_check_error = self._state_check_error
             auto_close_armed = self._auto_close_armed
             auto_close_remaining = (
                 max(
@@ -395,6 +454,8 @@ class DoorController:
             "auto_close_armed": auto_close_armed,
             "auto_close_remaining": auto_close_remaining,
             "state": state,
+            "last_state_check": last_state_check,
+            "state_check_error": state_check_error,
             "last_event": self.last_event,
             "last_error": self.last_error,
         }
@@ -433,7 +494,7 @@ class DoorController:
         return True
 
     @staticmethod
-    def _send_request(request) -> None:
+    def _request_json(request) -> dict:
         with urlopen(request, timeout=5) as response:
             if response.status >= 300:
                 raise RuntimeError(f"eWeLink relay returned HTTP {response.status}")
@@ -443,6 +504,100 @@ class DoorController:
                 raise RuntimeError("eWeLink relay returned an invalid response") from error
             if result.get("error", 0):
                 raise RuntimeError(f'eWeLink relay returned error {result["error"]}')
+            return result
+
+    @classmethod
+    def _send_request(cls, request) -> None:
+        cls._request_json(request)
+
+    @staticmethod
+    def _switches(values) -> dict[int, str]:
+        if not isinstance(values, list):
+            raise RuntimeError("eWeLink returned invalid relay states")
+        switches = {}
+        for item in values:
+            if not isinstance(item, dict) or item.get("switch") not in {"on", "off"}:
+                raise RuntimeError("eWeLink returned invalid relay states")
+            try:
+                outlet = int(item["outlet"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError("eWeLink returned invalid relay states") from error
+            switches[outlet] = item["switch"]
+        return switches
+
+    @classmethod
+    def _query_switches(cls, config: Config) -> dict[int, str]:
+        lan_error = None
+        if config.ewelink_host:
+            try:
+                result = cls._request_json(
+                    ewelink_info_request(
+                        config.ewelink_host,
+                        config.ewelink_port,
+                        config.ewelink_device_id,
+                        config.ewelink_device_key,
+                    )
+                )
+                data = ewelink_response_data(result, config.ewelink_device_key)
+                return cls._switches(data.get("switches"))
+            except (HTTPError, URLError, OSError, RuntimeError, ValueError) as error:
+                if isinstance(error, HTTPError):
+                    error.close()
+                lan_error = error
+        if config.ewelink_cloud_token:
+            try:
+                result = cls._request_json(
+                    cloud_status_request(
+                        config.ewelink_cloud_token,
+                        config.ewelink_cloud_app_id,
+                        config.ewelink_cloud_region,
+                        config.ewelink_device_id,
+                    )
+                )
+                data = result.get("data") or {}
+                params = data.get("params") if isinstance(data, dict) else None
+                return cls._switches(params.get("switches") if isinstance(params, dict) else None)
+            except (HTTPError, URLError, OSError, RuntimeError) as cloud_error:
+                if isinstance(cloud_error, HTTPError):
+                    cloud_error.close()
+                if lan_error:
+                    raise RuntimeError(
+                        f"LAN failed ({lan_error}); cloud failed ({cloud_error})"
+                    ) from cloud_error
+                raise
+        if lan_error:
+            raise lan_error
+        raise RuntimeError("No eWeLink LAN or cloud connection is configured")
+
+    def refresh_state(self) -> bool:
+        with self._guard:
+            config = self._config
+        if not self._configured(config):
+            return False
+        try:
+            switches = self._query_switches(config)
+            open_on = switches.get(config.ewelink_open_channel - 1) == "on"
+            close_on = switches.get(config.ewelink_close_channel - 1) == "on"
+            with self._guard:
+                if open_on != close_on:
+                    self._state = "open" if open_on else "closed"
+                    self.database.update_settings({"door_last_state": self._state})
+                recovered = bool(self._state_check_error)
+                self._state_check_error = ""
+                self._last_state_check = time.time()
+            if recovered:
+                log.info("eWeLink relay state check recovered")
+            return True
+        except (HTTPError, URLError, OSError, RuntimeError, ValueError) as error:
+            if isinstance(error, HTTPError):
+                error.close()
+            message = str(error)
+            with self._guard:
+                changed = message != self._state_check_error
+                self._state_check_error = message
+            if changed:
+                log.warning("eWeLink relay state check failed: %s", error)
+            return False
 
     @classmethod
     def _send(cls, config: Config, channel: int, state: str) -> None:
@@ -558,6 +713,21 @@ class DoorController:
             self._busy.release()
             if action == "open" and match is not None and failure is None:
                 self._arm_auto_close()
+
+
+def vision_runtime(config: Config, device: str) -> tuple[str, int, int]:
+    limited = config.performance_mode == "low_power" or (
+        config.performance_mode == "auto" and device == "cpu"
+    )
+    return (
+        "yolo11n.pt" if limited else config.yolo_model,
+        min(config.yolo_imgsz, 512) if limited else config.yolo_imgsz,
+        2 if limited else 1,
+    )
+
+
+def detection_caption(track: dict) -> str:
+    return f'{track.get("match") or track["label"]} · {track["confidence"]:.0%}'
 
 
 def spatial_layout_descriptor(crop: np.ndarray) -> np.ndarray:
@@ -749,9 +919,12 @@ class VisionSystem:
             from ultralytics import YOLO
 
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            if device == "cpu":
+                torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+            model_name, image_size, frame_stride = vision_runtime(self.config, device)
             with self.state_lock:
                 self.vision_state = f"loading models on {device}"
-            detector = YOLO(self.config.yolo_model)
+            detector = YOLO(model_name)
             embedder = MobileNetEmbedder(device)
             gate = AccessGate(self.config.confirmations, self.config.cooldown)
             embeddings: dict[int, np.ndarray] = {}
@@ -759,7 +932,7 @@ class VisionSystem:
             seen_sequence = -1
             processed = 0
             with self.state_lock:
-                self.vision_state = f"running on {device}"
+                self.vision_state = f"running on {device}{' (optimized)' if frame_stride > 1 else ''}"
             while not self.stop_event.is_set():
                 with self.capture_lock:
                     sequence, frame = self.raw_sequence, self.raw_frame
@@ -768,13 +941,15 @@ class VisionSystem:
                     continue
                 seen_sequence = sequence
                 processed += 1
+                if frame_stride > 1 and processed % frame_stride == 0:
+                    continue
                 result = detector.track(
                     frame,
                     persist=True,
                     tracker="bytetrack.yaml",
                     classes=list(self.labels),
                     conf=self.config.confidence,
-                    imgsz=self.config.yolo_imgsz,
+                    imgsz=image_size,
                     device=device,
                     verbose=False,
                 )[0]
@@ -870,7 +1045,7 @@ class VisionSystem:
                     x1, y1, x2, y2 = track["box"]
                     matched = track.get("match")
                     color = (61, 214, 140) if matched else (234, 177, 66)
-                    text = matched or track["label"]
+                    text = detection_caption(track)
                     cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
                     cv2.rectangle(
                         annotated,
@@ -922,6 +1097,7 @@ class VisionManager:
         self.placeholder = VisionSystem._message_frame("Camera is disabled")
 
     def start(self) -> None:
+        self.door.start()
         with self.lock:
             self.started = True
             if self.config.disable_vision:
@@ -985,6 +1161,7 @@ class VisionManager:
         self.door.update(new_config)
         self.config = new_config
         vision_changed = (
+            old_config.performance_mode,
             old_config.yolo_model,
             old_config.yolo_imgsz,
             old_config.confidence,
@@ -995,6 +1172,7 @@ class VisionManager:
             old_config.cooldown,
             old_config.jpeg_quality,
         ) != (
+            new_config.performance_mode,
             new_config.yolo_model,
             new_config.yolo_imgsz,
             new_config.confidence,
@@ -1144,6 +1322,9 @@ class CameraPayload(BaseModel):
 
 
 class SettingsPayload(BaseModel):
+    app_name: str = Field(min_length=1, max_length=40)
+    brand_palette: str = Field(pattern=r"^(teal|blue|violet|orange)$")
+    performance_mode: str = Field(pattern=r"^(auto|quality|low_power)$")
     yolo_model: str = Field(pattern=r"^yolo11[nsm]\.pt$")
     yolo_imgsz: int = Field(ge=320, le=1280)
     detection_confidence: float = Field(ge=0.05, le=0.95)
@@ -1167,11 +1348,14 @@ class SettingsPayload(BaseModel):
 
     @model_validator(mode="after")
     def valid_door(self):
+        self.app_name = self.app_name.strip()
         self.ewelink_model = self.ewelink_model.strip()
         self.ewelink_host = self.ewelink_host.strip()
         self.ewelink_device_id = self.ewelink_device_id.strip()
         self.ewelink_device_key = self.ewelink_device_key.strip()
         identity = (self.ewelink_device_id, self.ewelink_device_key)
+        if not self.app_name:
+            raise ValueError("app name cannot be blank")
         if not self.ewelink_model:
             raise ValueError("eWeLink model cannot be blank")
         if any(identity) and not all(identity):
@@ -1193,6 +1377,10 @@ class SettingsPayload(BaseModel):
 class EWeLinkOAuthStart(BaseModel):
     app_id: str = Field(min_length=1, max_length=200)
     app_secret: str = Field(min_length=1, max_length=200)
+
+
+class LogoPayload(BaseModel):
+    image: str = Field(min_length=32, max_length=1_500_000)
 
 
 class EWeLinkPasswordImport(BaseModel):
@@ -1257,6 +1445,7 @@ PUBLIC_PATHS = {
     "/login.js",
     "/visiongate.css",
     "/api/auth/login",
+    "/api/brand",
     "/api/ewelink/oauth/callback",
 }
 allowed_hosts = {
@@ -1289,7 +1478,13 @@ def _same_origin(request: Request) -> bool:
 
 
 def _secure_cookie(request: Request) -> bool:
-    return request.url.scheme == "https" or os.getenv("VISIONGATE_SECURE_COOKIES") == "1"
+    if request.url.scheme == "https" or os.getenv("VISIONGATE_SECURE_COOKIES") != "1":
+        return request.url.scheme == "https"
+    try:
+        address = ipaddress.ip_address(request.client.host)
+        return not (address.is_private or address.is_loopback or address.is_link_local)
+    except (AttributeError, ValueError):
+        return True
 
 
 @app.middleware("http")
@@ -1417,7 +1612,45 @@ def dashboard():
 
 @app.get("/logo.png", include_in_schema=False)
 def logo():
-    return FileResponse(ROOT / "media" / "logo.png", media_type="image/png")
+    custom = DATA_DIR / "logo.png"
+    return FileResponse(custom if custom.exists() else ROOT / "media" / "logo.png", media_type="image/png")
+
+
+@app.get("/api/brand")
+def branding():
+    settings = DATABASE.settings()
+    logo_path = DATA_DIR / "logo.png"
+    version = logo_path.stat().st_mtime_ns if logo_path.exists() else 0
+    return {
+        "name": settings.get("app_name", "VisionGate"),
+        "palette": settings.get("brand_palette", "teal"),
+        "logo": f"/logo.png?v={version}",
+    }
+
+
+@app.put("/api/branding/logo")
+def update_logo(payload: LogoPayload):
+    prefix = "data:image/png;base64,"
+    if not payload.image.startswith(prefix):
+        raise HTTPException(422, "Logo must be a PNG image")
+    try:
+        raw = base64.b64decode(payload.image[len(prefix) :], validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise HTTPException(422, "Logo must be a valid PNG image") from error
+    if len(raw) > 1_000_000 or raw[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
+        raise HTTPException(422, "Logo must be a valid PNG under 1 MB")
+    width, height = int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+    if not (32 <= width <= 2048 and 32 <= height <= 2048):
+        raise HTTPException(422, "Logo dimensions must be between 32 and 2048 pixels")
+    image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise HTTPException(422, "Logo must be a valid PNG image")
+    encoded = cv2.imencode(".png", image)[1].tobytes()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = DATA_DIR / "logo.tmp.png"
+    temporary.write_bytes(encoded)
+    os.replace(temporary, DATA_DIR / "logo.png")
+    return {"saved": True}
 
 
 @app.get("/visiongate.css", include_in_schema=False)

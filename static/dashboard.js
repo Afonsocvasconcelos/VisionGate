@@ -8,6 +8,17 @@ let ewelinkImportSession = null;
 let ewelinkImportedDevices = [];
 let toastTimer;
 let csrfToken = "";
+let brandName = "VisionGate";
+
+function applyBrand(brand) {
+  brandName = brand.name;
+  document.documentElement.dataset.palette = brand.palette;
+  document.querySelectorAll("[data-brand-name]").forEach(item => item.textContent = brand.name);
+  document.querySelectorAll("[data-brand-logo]").forEach(item => item.src = brand.logo);
+  document.title = brand.name;
+}
+
+async function loadBrand() { applyBrand(await api("/api/brand")); }
 
 function toast(message) {
   clearTimeout(toastTimer);
@@ -120,6 +131,10 @@ function renderSystem() {
   const timing = $("doorTiming");
   timing.hidden = !system.door.auto_close_armed;
   timing.textContent = system.door.auto_close_armed ? `Closing in ${Math.ceil(system.door.auto_close_remaining)}s` : "";
+  const check = $("doorCheck");
+  check.hidden = !doorReady;
+  check.textContent = system.door.state_check_error ? "Relay check unavailable" : system.door.last_state_check ? "Relay checked" : "Checking relay";
+  check.title = system.door.state_check_error || (system.door.last_state_check ? new Date(system.door.last_state_check * 1000).toLocaleString() : "");
   for (const id of ["doorOpenCard", "doorCloseCard"]) $(id).disabled = !doorReady || doorBusy;
   $("dot").className = `dot${online ? " ok" : camera?.vision === "failed" ? " bad" : ""}`;
   $("connection").textContent = online ? camera.name : camera ? "Camera offline" : "No camera";
@@ -155,6 +170,9 @@ function renderCameraList() {
 
 function fillSettings() {
   const s = config.settings;
+  $("appName").value = s.app_name ?? "VisionGate";
+  $("brandPalette").value = s.brand_palette ?? "teal";
+  $("performanceMode").value = s.performance_mode ?? "auto";
   $("yoloModel").value = s.yolo_model;
   $("yoloImgsz").value = s.yolo_imgsz;
   $("detectionConfidence").value = s.detection_confidence;
@@ -269,6 +287,9 @@ $("deleteCamera").onclick = async () => {
 $("settingsForm").onsubmit = async event => {
   event.preventDefault();
   const body = {
+    app_name: $("appName").value.trim(),
+    brand_palette: $("brandPalette").value,
+    performance_mode: $("performanceMode").value,
     yolo_model: $("yoloModel").value,
     yolo_imgsz: Number($("yoloImgsz").value),
     detection_confidence: Number($("detectionConfidence").value),
@@ -290,6 +311,18 @@ $("settingsForm").onsubmit = async event => {
   };
   try {
     await api("/api/settings", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const logo = $("appLogo").files[0];
+    if (logo) {
+      const image = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read the logo"));
+        reader.readAsDataURL(logo);
+      });
+      await api("/api/branding/logo", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({image})});
+      $("appLogo").value = "";
+    }
+    await loadBrand();
     $("settingsDialog").close();
     toast("Settings saved; affected cameras are restarting");
     await refreshAll();
@@ -308,7 +341,7 @@ async function loadEwelinkSetup() {
   $("ewelinkCallback").value = setup.callback_url;
   $("ewelinkQrLogin").disabled = !setup.local_login_allowed;
   $("ewelinkPasswordLogin").disabled = !setup.local_login_allowed;
-  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:8000 on the VisionGate PC to import an eWeLink device.";
+  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:8000 on this PC to import an eWeLink device.";
 }
 
 function showImportedDevices(sessionId, devices) {
@@ -353,7 +386,7 @@ $("ewelinkQrLogin").onclick = async () => {
   try {
     const credentials = ewelinkDeveloperCredentials();
     popup = window.open("about:blank", "ewelinkOAuth", "width=520,height=720");
-    if (!popup) throw new Error("Allow pop-ups for VisionGate, then try again");
+    if (!popup) throw new Error(`Allow pop-ups for ${brandName}, then try again`);
     popup.document.body.textContent = "Opening secure eWeLink authorization…";
     $("ewelinkImportStatus").textContent = "Starting eWeLink QR authorization…";
     const started = await api("/api/ewelink/oauth/start", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(credentials)});
@@ -381,7 +414,7 @@ $("ewelinkApplyImport").onclick = async () => {
     const result = await api("/api/ewelink/import/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     await refreshAll();
     $("ewelinkImportResult").classList.remove("show");
-    $("ewelinkImportStatus").textContent = `${result.name} imported. VisionGate now uses ${host ? "LAN with cloud fallback" : "cloud control"} on channels ${body.open_channel}/${body.close_channel}.`;
+    $("ewelinkImportStatus").textContent = `${result.name} imported. ${brandName} now uses ${host ? "LAN with cloud fallback" : "cloud control"} on channels ${body.open_channel}/${body.close_channel}.`;
     toast("eWeLink door configured");
   } catch (error) { $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
 };
@@ -425,7 +458,7 @@ $("doorOpenCard").onclick = () => testDoor("open");
 $("doorCloseCard").onclick = () => testDoor("close");
 
 async function start() {
-  await loadSession();
+  await Promise.all([loadSession(), loadBrand()]);
   await refreshAll();
   setInterval(refresh, 2000);
 }

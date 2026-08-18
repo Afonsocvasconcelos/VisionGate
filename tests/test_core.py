@@ -18,7 +18,9 @@ from core import (
     profile_similarity,
     reid_eligible,
     reid_regions,
+    ewelink_info_request,
     ewelink_request,
+    ewelink_response_data,
     rtsp_url_from_text,
     select_track,
 )
@@ -181,6 +183,36 @@ class SecurityCoreTests(unittest.TestCase):
             ewelink_request("192.168.2.50", 8081, "1000abcd12", "key", 5, "on")
         with self.assertRaises(ValueError):
             ewelink_request("192.168.2.50", 8081, "1000abcd12", "key", 1, "toggle")
+
+    def test_ewelink_info_request_and_encrypted_response_round_trip(self):
+        from Crypto.Cipher import AES
+
+        key = "1234567890abcdef"
+        iv = b"0123456789abcdef"
+        request = ewelink_info_request(
+            "192.168.2.50", 8081, "1000abcd12", key, sequence="123", iv=iv
+        )
+        plaintext = json.dumps(
+            {"switches": [{"switch": "on", "outlet": 0}]}, separators=(",", ":")
+        ).encode()
+        padding = 16 - len(plaintext) % 16
+        encrypted = AES.new(
+            hashlib.md5(key.encode()).digest(), AES.MODE_CBC, iv
+        ).encrypt(plaintext + bytes([padding]) * padding)
+
+        self.assertEqual(request.full_url, "http://192.168.2.50:8081/zeroconf/info")
+        self.assertEqual(
+            ewelink_response_data(
+                {
+                    "error": 0,
+                    "encrypt": True,
+                    "iv": base64.b64encode(iv).decode(),
+                    "data": base64.b64encode(encrypted).decode(),
+                },
+                key,
+            ),
+            {"switches": [{"switch": "on", "outlet": 0}]},
+        )
 
     def test_explicit_camera_credentials_override_stream_url_credentials(self):
         text = '''

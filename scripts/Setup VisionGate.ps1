@@ -163,7 +163,7 @@ try {
     Invoke-VisionGatePython @("-m", "pip", "check")
 
     Write-Host "Downloading the vision model files if needed..." -ForegroundColor Cyan
-    Invoke-VisionGatePython @("-c", "from ultralytics import YOLO; from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small; YOLO('yolo11s.pt'); mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)")
+    Invoke-VisionGatePython @("-c", "from ultralytics import YOLO; from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small; YOLO('yolo11n.pt'); mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)")
 
     if (-not (Test-Path -LiteralPath (Join-Path $root ".env"))) {
         Copy-Item -LiteralPath (Join-Path $root ".env.example") -Destination (Join-Path $root ".env")

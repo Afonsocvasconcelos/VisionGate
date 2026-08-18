@@ -11,9 +11,9 @@
 <body>
   <a class="skip-link" href="#liveCamera">Skip to live camera</a>
   <header class="topbar">
-    <a class="brand" href="#liveCamera" aria-label="VisionGate home">
-      <img src="/logo.png" alt="">
-      <strong>VisionGate</strong>
+    <a class="brand" href="#liveCamera" aria-label="App home">
+      <img data-brand-logo src="/logo.png" alt="">
+      <strong data-brand-name>VisionGate</strong>
     </a>
     <div class="top-actions">
       <span class="connection"><span id="dot" class="dot" aria-hidden="true"></span><span id="connection">Connecting</span></span>
@@ -45,8 +45,9 @@
       <section class="panel door-card" aria-labelledby="doorTitle">
         <header class="door-head">
           <h2 id="doorTitle">Door</h2>
-          <div id="doorStateBox" class="door-state" data-state="unknown"><span>Last known</span><strong id="doorState">Checking...</strong></div>
+          <div id="doorStateBox" class="door-state" data-state="unknown"><span>Last action</span><strong id="doorState">Checking...</strong></div>
         </header>
+        <p id="doorCheck" class="door-check" hidden></p>
         <p id="doorTiming" class="door-timing" hidden></p>
         <div class="door-controls">
           <button id="doorOpenCard" class="door-button" type="button">Open</button>
@@ -96,13 +97,14 @@
 
   <dialog id="settingsDialog">
     <form id="settingsForm">
-      <div class="dialog-head"><div><span class="panel-kicker">VisionGate</span><h2>Settings</h2></div><button class="close" type="button" data-close="settingsDialog" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><span class="panel-kicker" data-brand-name>VisionGate</span><h2>Settings</h2></div><button class="close" type="button" data-close="settingsDialog" aria-label="Close">×</button></div>
       <div class="dialog-body">
-        <p class="notice">This dashboard uses a file-only login. Run <strong>Configure Login.bat</strong> on the VisionGate PC to change it; credentials cannot be changed here.</p>
+        <p class="notice">Change the file-only login with <strong>Configure Login.bat</strong> on this PC.</p>
         <div class="tabs" role="tablist" aria-label="Settings sections">
           <button id="camerasTabButton" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="camerasTab" data-tab="camerasTab">Cameras</button>
           <button id="recognitionTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="recognitionTab" data-tab="recognitionTab">Recognition</button>
           <button id="doorTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="doorTab" data-tab="doorTab">Door &amp; eWeLink</button>
+          <button id="appearanceTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="appearanceTab" data-tab="appearanceTab">Appearance</button>
         </div>
 
         <section id="camerasTab" class="tab-panel active" role="tabpanel" aria-labelledby="camerasTabButton">
@@ -114,7 +116,8 @@
           <div class="settings-section">
             <h3>Detection engine</h3>
             <div class="form-grid">
-              <label for="yoloModel">YOLO model<select id="yoloModel"><option value="yolo11n.pt">YOLO11 Nano · fastest</option><option value="yolo11s.pt">YOLO11 Small · recommended</option><option value="yolo11m.pt">YOLO11 Medium · most accurate</option></select></label>
+              <label for="performanceMode">Performance<select id="performanceMode"><option value="auto">Automatic · recommended</option><option value="quality">Full quality</option><option value="low_power">Low power</option></select></label>
+              <label for="yoloModel">YOLO model<select id="yoloModel"><option value="yolo11n.pt">YOLO11 Nano · recommended</option><option value="yolo11s.pt">YOLO11 Small · higher accuracy</option><option value="yolo11m.pt">YOLO11 Medium · most accurate</option></select></label>
               <label for="yoloImgsz">YOLO image size<input id="yoloImgsz" type="number" min="320" max="1280" step="32"></label>
               <label for="detectionConfidence">Detection confidence<input id="detectionConfidence" type="number" min="0.05" max="0.95" step="0.05"></label>
               <label for="jpegQuality">Video JPEG quality<input id="jpegQuality" type="number" min="40" max="100" step="1"></label>
@@ -135,7 +138,7 @@
         <section id="doorTab" class="tab-panel" role="tabpanel" aria-labelledby="doorTabButton">
           <div class="settings-section">
             <h3>Door relay</h3>
-            <p class="notice">Your 4CH Pro R2 uses channel 1 to open and channel 2 to close. A reachable IP enables fast LAN control; otherwise VisionGate uses the imported cloud connection.</p>
+            <p class="notice">A reachable device IP enables fast LAN control; otherwise the imported cloud connection is used.</p>
             <div class="form-grid">
               <label class="wide" for="ewelinkModel">Device model<input id="ewelinkModel" required maxlength="80" placeholder="SONOFF 4CH Pro R2"></label>
               <label for="ewelinkHost">Device IP (optional)<input id="ewelinkHost" maxlength="45" placeholder="Cloud control when blank"></label>
@@ -175,6 +178,17 @@
               <div class="import-actions"><button id="ewelinkApplyImport" class="btn primary" type="button">Use selected device</button></div>
             </div>
           </section>
+        </section>
+
+        <section id="appearanceTab" class="tab-panel" role="tabpanel" aria-labelledby="appearanceTabButton">
+          <div class="settings-section">
+            <h3>Brand</h3>
+            <div class="form-grid">
+              <label for="appName">App name<input id="appName" required maxlength="40"></label>
+              <label for="brandPalette">Color palette<select id="brandPalette"><option value="teal">Teal</option><option value="blue">Blue</option><option value="violet">Violet</option><option value="orange">Orange</option></select></label>
+              <label class="wide" for="appLogo">Logo (PNG, up to 1 MB)<input id="appLogo" type="file" accept="image/png"></label>
+            </div>
+          </div>
         </section>
       </div>
       <div class="dialog-actions"><button class="btn" type="button" data-close="settingsDialog">Cancel</button><button class="btn primary" type="submit">Save settings</button></div>

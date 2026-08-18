@@ -9,6 +9,9 @@ if errorlevel 1 goto :failed
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup VisionGate.ps1" -Action Update
 if errorlevel 1 goto :failed
 
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Public Access.ps1" -Action Update
+if errorlevel 1 goto :failed
+
 echo.
 echo VisionGate is up to date. Your cameras, whitelist, events, and settings were preserved.
 pause
