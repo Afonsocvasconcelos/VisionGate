@@ -341,7 +341,7 @@ async function loadEwelinkSetup() {
   $("ewelinkCallback").value = setup.callback_url;
   $("ewelinkQrLogin").disabled = !setup.local_login_allowed;
   $("ewelinkPasswordLogin").disabled = !setup.local_login_allowed;
-  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:8000 on this PC to import an eWeLink device.";
+  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:83 on this PC to import an eWeLink device.";
 }
 
 function showImportedDevices(sessionId, devices) {

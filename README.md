@@ -34,7 +34,7 @@ Double-click **Update VisionGate.bat**. It upgrades compatible dependencies, rep
 No Home Assistant, developer account, or MQTT broker is required. VisionGate prefers encrypted direct-LAN commands and falls back to eWeLink cloud control when the relay has no reachable LAN address.
 
 1. Pair the 4CH Pro R2 in the ordinary eWeLink app and install any offered firmware update.
-2. On the VisionGate PC, open `http://127.0.0.1:8000`.
+2. On the VisionGate PC, open `http://127.0.0.1:83`.
 3. Select **Settings > Door & eWeLink > Import device from eWeLink**.
 4. Enter the ordinary eWeLink account and password, then choose **Sign in and find devices**. The password is used once and is never saved.
 5. Choose the 4CH Pro R2 and select **Use selected device**. Keep open channel `1`, close channel `2`, and a short pulse unless this installation differs.
@@ -47,42 +47,40 @@ The dashboard's **Last action** survives restarts. VisionGate checks the relay w
 
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
-For credential safety, eWeLink importer sign-in is enabled only at `http://127.0.0.1:8000` on the VisionGate PC. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
+For credential safety, eWeLink importer sign-in is enabled only at `http://127.0.0.1:83` on the VisionGate PC. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
 
 ## Run
 
 Double-click **Launch VisionGate.bat**. It checks the installation, requests a one-time Windows private-network firewall rule, starts the server, and opens the dashboard.
 
-The console prints the current `http://192.168.x.x:8000` address for phones and other local devices.
+The console prints the current `http://192.168.x.x:83` address for phones and other local devices.
 
 The responsive interface contains the live camera, door controls, authorized identities, and settings. Diagnostics and event history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
 
 The equivalent manual command is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 83 --no-proxy-headers
 ```
 
 On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, door details, app name, logo, and color palette. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
 
 The dashboard login cannot be changed from the website. Double-click **Configure Login.bat** on the VisionGate PC, choose a new username/password, then restart VisionGate. Only the username and a salted scrypt password hash are kept in `.env`; the password itself is never stored. Sessions are server-side, expire after 30 idle minutes or 8 total hours, and use HttpOnly/SameSite cookies, CSRF validation, login throttling, and restrictive browser security headers.
 
-Keep VisionGate on a trusted private LAN and never expose port 8000 directly to the internet. Use the guided HTTPS setup below for internet access; plain HTTP cannot protect credentials from a device already able to intercept that network.
+VisionGate uses direct HTTP on port 83 as requested. HTTP cannot protect credentials, camera video, sessions, or door commands from interception; use a unique password and keep the application updated.
 
 ## Access VisionGate over the internet
 
-Do not forward port `8000`. VisionGate includes a guided Caddy reverse-proxy setup so the public site uses HTTPS with automatic certificate renewal.
+You need the router's public IPv4 address or a DDNS name. If the internet provider uses CGNAT and the router has no public IP, ordinary port forwarding cannot work.
 
-You need a public domain or DDNS name pointed at your home public IP. A free DDNS hostname is sufficient. If the internet provider uses CGNAT and the router has no public IP, ordinary port forwarding cannot work; use a private VPN or managed tunnel instead.
-
-1. Double-click **Configure Online Access.bat** and enter the domain only, without `https://` or a path.
-2. Approve the Caddy installation and Windows Firewall request.
+1. Double-click **Configure Online Access.bat** and enter the public IPv4 address or DDNS name.
+2. Approve the Windows Firewall request.
 3. Reserve this PC's local IP address in the router so it does not change.
-4. In the router's port-forwarding page, forward external TCP port `80` to this PC's port `80`, and external TCP port `443` to this PC's port `443`.
-5. Do not enable router DMZ mode and do not forward port `8000`.
-6. Close any running VisionGate command window, launch VisionGate again, and test the displayed `https://` URL from a phone with Wi-Fi disabled.
+4. In the router, forward external TCP port `83` to this PC's TCP port `83`.
+5. Remove old VisionGate forwards for ports `80`, `443`, and `8000`; do not enable DMZ mode.
+6. Restart VisionGate and test the displayed `http://address:83` URL from a phone with Wi-Fi disabled.
 
-Caddy obtains and renews the public TLS certificate and redirects HTTP to HTTPS. The launcher validates and starts Caddy automatically after setup. Rerun **Configure Online Access.bat** to change the domain. Use a unique login password and keep **Update VisionGate.bat** current because this endpoint controls a physical door.
+Rerun **Configure Online Access.bat** if the public address changes. Keep **Update VisionGate.bat** current because this endpoint controls a physical door.
 
 ## Enroll and calibrate
 

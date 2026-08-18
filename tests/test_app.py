@@ -608,7 +608,7 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(logo.status_code, 200)
         self.assertEqual(logo.headers["content-type"], "image/png")
         self.assertEqual(
-            network.json()["urls"], ["http://192.168.2.197:8000"]
+            network.json()["urls"], ["http://192.168.2.197:83"]
         )
 
     def test_invalid_door_settings_are_not_persisted(self):

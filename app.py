@@ -64,6 +64,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("visiongate")
 AUTH = AuthManager.from_environment()
 SESSION_COOKIE = "vg"
+APP_PORT = 83
 
 
 def _number(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -1536,7 +1537,7 @@ def _require_local_login(request: Request) -> None:
     if not _local_request(request):
         raise HTTPException(
             403,
-            "For account safety, open VisionGate at http://127.0.0.1:8000 on its PC to import eWeLink devices",
+            f"For account safety, open VisionGate at http://127.0.0.1:{APP_PORT} on its PC to import eWeLink devices",
         )
 
 
@@ -1672,8 +1673,8 @@ def dashboard_script():
 def network_access():
     addresses = local_ipv4_addresses()
     return {
-        "port": 8000,
-        "urls": [f"http://{address}:8000" for address in addresses],
+        "port": APP_PORT,
+        "urls": [f"http://{address}:{APP_PORT}" for address in addresses],
     }
 
 

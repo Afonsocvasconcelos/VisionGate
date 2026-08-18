@@ -43,7 +43,7 @@ class EWeLinkCloudTests(unittest.TestCase):
         url = EWeLinkCloud.authorization_url(
             "client-id",
             "client-secret",
-            "http://127.0.0.1:8000/api/ewelink/oauth/callback",
+            "http://127.0.0.1:83/api/ewelink/oauth/callback",
             "csrf-state",
             seq="123",
             nonce="a1B2c3D4",
@@ -58,7 +58,7 @@ class EWeLinkCloudTests(unittest.TestCase):
         self.assertEqual(query["state"], ["csrf-state"])
         self.assertEqual(
             query["redirectUrl"],
-            ["http://127.0.0.1:8000/api/ewelink/oauth/callback"],
+            ["http://127.0.0.1:83/api/ewelink/oauth/callback"],
         )
 
     def test_qr_nonce_is_exactly_eight_alphanumeric_characters(self):
@@ -102,7 +102,7 @@ class EWeLinkCloudTests(unittest.TestCase):
             devices = EWeLinkCloud().oauth_devices(
                 "client-id",
                 "client-secret",
-                "http://127.0.0.1:8000/api/ewelink/oauth/callback",
+                "http://127.0.0.1:83/api/ewelink/oauth/callback",
                 "authorization-code",
                 "eu",
             )

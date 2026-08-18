@@ -169,14 +169,14 @@ class InstallerTests(unittest.TestCase):
     def test_launcher_reuses_an_existing_healthy_server_before_starting_uvicorn(self):
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
 
-        self.assertIn("http://127.0.0.1:8000/health", launcher)
+        self.assertIn("http://127.0.0.1:83/health", launcher)
         self.assertIn("VisionGate is already running", launcher)
         self.assertLess(
-            launcher.index("http://127.0.0.1:8000/health"),
+            launcher.index("http://127.0.0.1:83/health"),
             launcher.index("-m uvicorn"),
         )
 
-    def test_public_access_plan_builds_an_https_reverse_proxy(self):
+    def test_public_access_plan_uses_direct_http_port_83(self):
         result = subprocess.run(
             [
                 "powershell.exe",
@@ -187,7 +187,7 @@ class InstallerTests(unittest.TestCase):
                 str(PUBLIC_SETUP),
                 "-Action",
                 "Plan",
-                "-Domain",
+                "-HostName",
                 "door.example.com",
             ],
             cwd=ROOT,
@@ -198,13 +198,12 @@ class InstallerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         plan = json.loads(result.stdout.strip().splitlines()[-1])
-        self.assertEqual(plan["public_url"], "https://door.example.com")
-        self.assertIn("reverse_proxy 127.0.0.1:8000", plan["caddyfile"])
-        self.assertIn("max_size 2MB", plan["caddyfile"])
-        self.assertIn("flush_interval -1", plan["caddyfile"])
-        self.assertNotIn("tls_insecure_skip_verify", plan["caddyfile"])
+        self.assertEqual(plan["public_url"], "http://door.example.com:83")
+        self.assertEqual(plan["port"], 83)
+        self.assertEqual(plan["allowed_host"], "door.example.com")
+        self.assertNotIn("caddyfile", plan)
 
-    def test_public_access_rejects_a_domain_that_could_inject_caddy_config(self):
+    def test_public_access_rejects_an_invalid_public_host(self):
         result = subprocess.run(
             [
                 "powershell.exe",
@@ -215,7 +214,7 @@ class InstallerTests(unittest.TestCase):
                 str(PUBLIC_SETUP),
                 "-Action",
                 "Plan",
-                "-Domain",
+                "-HostName",
                 "door.example.com { respond hacked }",
             ],
             cwd=ROOT,
@@ -226,20 +225,49 @@ class InstallerTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
 
-    def test_launcher_starts_public_https_with_only_local_proxy_headers_trusted(self):
+    def test_public_access_accepts_a_public_ipv4_address(self):
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PUBLIC_SETUP),
+                "-Action",
+                "Plan",
+                "-HostName",
+                "203.0.113.10",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout.strip().splitlines()[-1])["public_url"],
+            "http://203.0.113.10:83",
+        )
+
+    def test_launcher_uses_only_direct_http_port_83(self):
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+        public_setup = PUBLIC_SETUP.read_text(encoding="utf-8")
 
         self.assertTrue((ROOT / "Configure Online Access.bat").exists())
-        self.assertIn(r"scripts\Public Access.ps1", launcher)
-        self.assertIn("-Action Start", launcher)
-        self.assertIn("--proxy-headers --forwarded-allow-ips 127.0.0.1", launcher)
-        self.assertNotIn('--forwarded-allow-ips "*"', launcher)
+        self.assertIn("--host 0.0.0.0 --port 83", launcher)
+        self.assertIn("localport=83", launcher)
+        self.assertIn('delete rule name="VisionGate"', public_setup)
+        self.assertIn('localport=83 profile=any', public_setup)
+        self.assertNotIn("--proxy-headers", launcher)
+        self.assertNotIn("https://", launcher.lower())
 
-    def test_updater_keeps_the_public_https_proxy_current(self):
+    def test_updater_has_no_https_proxy_dependency(self):
         updater = (ROOT / "Update VisionGate.bat").read_text(encoding="utf-8")
 
-        self.assertIn(r"scripts\Public Access.ps1", updater)
-        self.assertIn("-Action Update", updater)
+        self.assertNotIn(r"scripts\Public Access.ps1", updater)
+        self.assertNotIn("Caddy", updater)
 
 
 if __name__ == "__main__":

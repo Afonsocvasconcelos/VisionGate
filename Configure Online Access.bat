@@ -7,7 +7,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Public Acc
 if errorlevel 1 goto :failed
 
 echo.
-echo Online access is configured. Follow the router steps shown above,
+echo HTTP port 83 access is configured. Follow the router steps shown above,
 echo then close any running VisionGate window and launch it again.
 pause
 exit /b 0
