@@ -165,6 +165,167 @@ class DoorControllerTests(unittest.TestCase):
             self.assertEqual(restarted["state"], "unknown")
             self.assertEqual(restarted["last_command"], "close")
 
+
+    def test_dashboard_has_camera_delete_and_persistent_automation_picker_without_primary_door(self):
+        with TestClient(app) as client:
+            dashboard = client.get("/").text
+            script = client.get("/dashboard.js").text
+            editor = client.get("/automations").text
+            editor_script = client.get("/automations.js").text
+
+        combined = dashboard + script + editor + editor_script
+        self.assertIn("cameraDelete", script)
+        self.assertIn('id="dashboardAutomation"', dashboard)
+        self.assertIn('id="dashboardModules"', dashboard)
+        self.assertIn('id="customizeDashboard"', dashboard)
+        self.assertIn('class="node-template trigger"', editor)
+        self.assertIn("dataTransfer", editor_script)
+        self.assertIn("runDashboardAutomation", script)
+        self.assertIn("/api/dashboard/automation/modules", script)
+        self.assertIn("draggable", script)
+        self.assertNotIn("Primary Door", combined)
+        self.assertNotIn("primary_door", combined)
+
+    def test_dashboard_automation_selection_persists_in_the_database(self):
+        graph = {
+            "schema_version": 1,
+            "name": "First",
+            "enabled": False,
+            "revision": 1,
+            "max_concurrent_runs": 1,
+            "nodes": [{"id": "manual", "kind": "trigger.manual", "config": {}}],
+            "edges": [],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "dashboard-selection.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            first = database.create_automation("First", graph)
+            second = database.create_automation("Second", {**graph, "name": "Second"})
+            manager = VisionManager(database, _config(settings))
+            with patch("app.DATABASE", database), patch("app.MANAGER", manager):
+                with TestClient(app) as client:
+                    initial = client.get("/api/dashboard/automation")
+                    selected = client.put(
+                        "/api/dashboard/automation", json={"automation_id": second.id}
+                    )
+                    reloaded = client.get("/api/dashboard/automation")
+
+            self.assertEqual(initial.json()["selected_id"], first.id)
+            self.assertEqual(selected.status_code, 200)
+            self.assertEqual(reloaded.json()["selected_id"], second.id)
+            self.assertEqual(Database(database.path).settings()["dashboard_automation_id"], second.id)
+
+    def test_dashboard_selection_returns_and_persists_automation_specific_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "dashboard-modules.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            camera = database.add_camera(
+                "Driveway", "rtsp://camera.local:554/live", enabled=False
+            )
+            database.sync_ewelink_devices(
+                [
+                    {
+                        "id": "1000abcd12",
+                        "name": "Gate relay",
+                        "model": "4CHPROR2",
+                        "device_key": "device-key",
+                        "uiid": 126,
+                        "online": True,
+                        "params": {"switches": []},
+                    }
+                ]
+            )
+            graph = {
+                "schema_version": 1,
+                "name": "Manual gate",
+                "enabled": True,
+                "revision": 1,
+                "max_concurrent_runs": 1,
+                "nodes": [
+                    {"id": "manual", "kind": "trigger.manual", "config": {}},
+                    {
+                        "id": "camera",
+                        "kind": "action.camera.disable",
+                        "config": {"camera_id": camera.id},
+                    },
+                    {
+                        "id": "relay",
+                        "kind": "action.ewelink.button",
+                        "config": {
+                            "device_id": "1000abcd12",
+                            "channel": 1,
+                            "pulse_seconds": 1,
+                        },
+                    },
+                ],
+                "edges": [
+                    {
+                        "id": "to-camera",
+                        "from": "manual",
+                        "to": "camera",
+                        "outcome": "success",
+                        "steps": [],
+                    },
+                    {
+                        "id": "to-relay",
+                        "from": "manual",
+                        "to": "relay",
+                        "outcome": "success",
+                        "steps": [],
+                    },
+                ],
+            }
+            first = database.create_automation("Manual gate", graph, enabled=True)
+            second = database.create_automation(
+                "Manual only",
+                {
+                    **graph,
+                    "name": "Manual only",
+                    "nodes": [graph["nodes"][0]],
+                    "edges": [],
+                },
+            )
+            manager = VisionManager(database, _config(settings))
+            with patch("app.DATABASE", database), patch("app.MANAGER", manager):
+                with TestClient(app) as client:
+                    initial = client.get("/api/dashboard/automation")
+                    saved = client.put(
+                        "/api/dashboard/automation/modules",
+                        json={
+                            "automation_id": first.id,
+                            "modules": ["ewelink:1000abcd12", "manual"],
+                        },
+                    )
+                    reloaded = client.get("/api/dashboard/automation")
+                    selected = client.put(
+                        "/api/dashboard/automation",
+                        json={"automation_id": second.id},
+                    )
+                    rejected = client.put(
+                        "/api/dashboard/automation/modules",
+                        json={
+                            "automation_id": second.id,
+                            "modules": [f"camera:{camera.id}"],
+                        },
+                    )
+
+            self.assertEqual(
+                initial.json()["available_modules"],
+                ["manual", f"camera:{camera.id}", "ewelink:1000abcd12"],
+            )
+            self.assertEqual(initial.json()["modules"], initial.json()["available_modules"])
+            self.assertTrue(initial.json()["selected"]["has_manual_trigger"])
+            self.assertEqual(saved.json()["modules"], ["ewelink:1000abcd12", "manual"])
+            self.assertEqual(reloaded.json()["modules"], ["ewelink:1000abcd12", "manual"])
+            self.assertEqual(selected.json()["selected"]["id"], second.id)
+            self.assertEqual(selected.json()["modules"], ["manual"])
+            self.assertEqual(rejected.status_code, 422)
+            self.assertEqual(
+                Database(database.path).settings()["dashboard_layouts"][str(first.id)],
+                ["ewelink:1000abcd12", "manual"],
+            )
+
+
     def test_existing_door_events_seed_last_known_state(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "door-state.db")
@@ -487,16 +648,16 @@ class AppearanceTests(unittest.TestCase):
         left = authorized_presence_events({21: match}, {}, camera)
         classes = object_class_events({"person"}, {"person", "car"}, camera)
 
-        self.assertEqual([kind for kind, _payload in arrived], ["trigger.camera.authorized_appeared"])
+        self.assertEqual([kind for kind, _payload in arrived], ["trigger.camera.authorized_presence"])
+        self.assertTrue(arrived[0][1]["present"])
         self.assertEqual(unchanged, [])
         self.assertEqual(
             [kind for kind, _payload in left],
-            [
-                "trigger.camera.authorized_disappeared",
-                "trigger.camera.no_authorized_present",
-            ],
+            ["trigger.camera.authorized_presence"],
         )
-        self.assertEqual(classes[0][0], "trigger.camera.class_appeared")
+        self.assertFalse(left[0][1]["present"])
+        self.assertEqual(classes[0][0], "trigger.camera.class_presence")
+        self.assertTrue(classes[0][1]["present"])
         self.assertEqual(classes[0][1]["label"], "car")
         self.assertEqual(arrived[0][1]["profile_name"], "Alice")
 
@@ -701,8 +862,9 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn(".mini-button { min-width: var(--tap); min-height: var(--tap); }", stylesheet.text)
         self.assertIn("prefers-reduced-motion", stylesheet.text)
         self.assertIn('class="topbar"', dashboard.text)
-        self.assertIn('id="liveCamera"', dashboard.text)
-        self.assertIn("Door sensor", dashboard_script.text)
+        self.assertIn('id="automationDashboard"', dashboard.text)
+        self.assertIn('id="dashboardModules"', dashboard.text)
+        self.assertIn("loadDashboardAutomations", dashboard_script.text)
 
     def test_everyday_ui_contains_only_operational_controls(self):
         with BaseTestClient(app) as public_client:
@@ -711,25 +873,12 @@ class WebAccessTests(unittest.TestCase):
         with TestClient(app) as private_client:
             dashboard = private_client.get("/").text
 
-        self.assertIn('id="doorState"', dashboard)
+        self.assertIn('id="dashboardAutomation"', dashboard)
         self.assertNotIn('id="tracks"', dashboard)
         self.assertNotIn('id="activity"', dashboard)
         self.assertNotIn('id="threshold"', dashboard)
         self.assertNotIn(".door-button:first-child", stylesheet)
         self.assertNotIn("auth-story", login)
-
-    def test_dashboard_can_request_an_immediate_door_state_check(self):
-        with TestClient(app) as client, patch.object(
-            app_module.MANAGER.door, "refresh_state", return_value=True
-        ) as refreshed, patch.object(
-            app_module.MANAGER.devices, "refresh", return_value=[]
-        ) as devices_refreshed:
-            response = client.post("/api/door/refresh")
-
-        self.assertEqual(response.status_code, 200)
-        devices_refreshed.assert_called_once_with()
-        refreshed.assert_called_once_with()
-        self.assertIn(response.json()["state"], {"unknown", "changing", "unavailable"})
 
     def test_visiongate_logo_and_lan_access_information_are_available(self):
         with patch("app.local_ipv4_addresses", return_value=["192.168.2.197"]):
@@ -742,25 +891,6 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(
             network.json()["urls"], ["http://192.168.2.197:83"]
         )
-
-    def test_invalid_door_settings_are_not_persisted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "invalid-settings.db")
-            settings = database.update_settings(DEFAULT_SETTINGS)
-            manager = VisionManager(database, _config(settings))
-
-            with self.assertRaises(ValueError):
-                manager.update_settings(
-                    {
-                        "ewelink_device_id": "1000abcd12",
-                        "ewelink_device_key": "device-key",
-                        "ewelink_host": "",
-                    }
-                )
-
-            saved = database.settings()
-            self.assertEqual(saved["ewelink_device_id"], "")
-            self.assertEqual(saved["ewelink_device_key"], "")
 
     def test_recognition_model_and_lookalike_margin_are_persistent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -781,24 +911,6 @@ class WebAccessTests(unittest.TestCase):
             self.assertEqual(database.settings()["match_margin"], 0.07)
             self.assertEqual(manager.config.auto_close_seconds, 17)
             self.assertEqual(database.settings()["auto_close_seconds"], 17)
-
-    def test_door_test_reports_the_completed_relay_failure(self):
-        class Door:
-            configured = True
-            busy = False
-            last_error = "eWeLink relay rejected the command"
-
-            @staticmethod
-            def trigger(*_args, **_kwargs):
-                return True
-
-        manager = type("Manager", (), {"door": Door()})()
-        with patch("app.MANAGER", manager):
-            with self.assertRaises(app_module.HTTPException) as raised:
-                app_module.test_door(app_module.DoorTest(confirm=True, action="open"))
-
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertIn("rejected", raised.exception.detail)
 
     def test_dashboard_and_status_are_available_after_login(self):
         with TestClient(app) as client:
@@ -947,8 +1059,8 @@ class WebAccessTests(unittest.TestCase):
             self.assertIn("match_threshold", config.json()["settings"])
             self.assertIn("match_margin", config.json()["settings"])
             self.assertIn("yolo_model", config.json()["settings"])
-            self.assertIn("auto_close_seconds", config.json()["settings"])
-            self.assertIn("ewelink_open_channel", config.json()["settings"])
+            self.assertNotIn("auto_close_seconds", config.json()["settings"])
+            self.assertNotIn("ewelink_open_channel", config.json()["settings"])
             events = client.get("/api/events")
             self.assertEqual(events.status_code, 200)
             self.assertIsInstance(events.json(), list)
@@ -986,8 +1098,6 @@ class WebAccessTests(unittest.TestCase):
                 key: saved_settings[key]
                 for key in app_module.SettingsPayload.model_fields
             }
-            settings_payload.pop("auto_close_seconds")
-            settings_payload["ewelink_device_key"] = ""
             with patch("app.DATABASE", database), patch("app.MANAGER", manager):
                 with TestClient(app) as client:
                     config = client.get("/api/config")
@@ -1012,7 +1122,7 @@ class WebAccessTests(unittest.TestCase):
             self.assertNotIn("password", config.json()["cameras"][0])
             self.assertTrue(config.json()["cameras"][0]["password_configured"])
             self.assertNotIn("ewelink_device_key", config.json()["settings"])
-            self.assertTrue(config.json()["settings"]["ewelink_device_key_configured"])
+            self.assertNotIn("ewelink_device_key_configured", config.json()["settings"])
             self.assertEqual(database.camera(camera.id).password, "camera-secret-value")
             self.assertEqual(database.settings()["ewelink_device_key"], "relay-secret-value")
 
@@ -1072,9 +1182,9 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn('id="appLogo"', dashboard)
         self.assertIn('id="ewelinkQrLogin"', dashboard)
         self.assertIn('id="ewelinkPasswordLogin"', dashboard)
-        self.assertIn('id="ewelinkImportDevice"', dashboard)
+        self.assertNotIn('id="ewelinkImportDevice"', dashboard)
         self.assertIn("No developer account required", dashboard)
-        self.assertIn("Device IP (optional)", dashboard)
+        self.assertNotIn("Device IP (optional)", dashboard)
         self.assertIn("The account password is never saved", dashboard)
         self.assertIn('id="logout"', dashboard)
         self.assertIn("Configure Login.bat", dashboard)
@@ -1116,6 +1226,7 @@ class WebAccessTests(unittest.TestCase):
         self.assertNotIn("device-secret", rendered)
         self.assertEqual(response.json()["devices"][0]["id"], "1000abcd12")
         saved = app_module.DATABASE.settings()
+        self.assertIsNotNone(app_module.DATABASE.ewelink_device("1000abcd12"))
         self.assertNotIn("ewelink_account", saved)
         self.assertNotIn("ewelink_password", saved)
         self.assertNotIn("ewelink_app_secret", saved)
@@ -1139,7 +1250,7 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(qr.status_code, 403)
         self.assertEqual(password.status_code, 403)
 
-    def test_imported_device_is_saved_with_user_selected_channels(self):
+    def test_imported_device_is_saved_without_assigning_a_special_role(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "import.db")
             settings = database.update_settings(DEFAULT_SETTINGS)
@@ -1175,13 +1286,10 @@ class WebAccessTests(unittest.TestCase):
                 app_module.MANAGER = original_manager
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["mode"], "lan")
-            saved = database.settings()
-            self.assertEqual(saved["ewelink_device_id"], "1000abcd12")
-            self.assertEqual(saved["ewelink_device_key"], "device-secret")
-            self.assertEqual(saved["ewelink_host"], "192.168.1.44")
-            self.assertEqual(saved["ewelink_open_channel"], 1)
-            self.assertEqual(saved["ewelink_close_channel"], 2)
+            self.assertEqual(response.json()["device_count"], 1)
+            saved = database.ewelink_device("1000abcd12")
+            self.assertEqual(saved.device_key, "device-secret")
+            self.assertEqual(database.settings()["ewelink_device_id"], "")
 
     def test_cloud_device_can_be_applied_without_a_lan_ip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1222,9 +1330,8 @@ class WebAccessTests(unittest.TestCase):
                 app_module.MANAGER = original_manager
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["mode"], "cloud")
+            self.assertEqual(response.json()["device_count"], 1)
             saved = database.settings()
-            self.assertEqual(saved["ewelink_host"], "")
             self.assertEqual(saved["ewelink_cloud_token"], "access-token")
 
     def test_device_inventory_api_redacts_secrets_and_requires_action_confirmation(self):
@@ -1282,52 +1389,7 @@ class WebAccessTests(unittest.TestCase):
             "1000abcd12", "switch", {"channel": 1, "state": "on"}
         )
 
-    def test_imported_device_can_be_selected_as_primary_door_without_exposing_its_key(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "primary-door.db")
-            settings = database.update_settings(DEFAULT_SETTINGS)
-            database.sync_ewelink_devices(
-                [
-                    {
-                        "id": "1000abcd12",
-                        "name": "Gate relay",
-                        "model": "4CHPROR2",
-                        "device_key": "primary-door-secret",
-                        "uiid": 126,
-                        "online": True,
-                        "params": {
-                            "switches": [
-                                {"outlet": index, "switch": "off"}
-                                for index in range(4)
-                            ]
-                        },
-                    }
-                ]
-            )
-            manager = VisionManager(database, _config(settings))
-            with patch("app.DATABASE", database), patch("app.MANAGER", manager):
-                with TestClient(app) as client:
-                    response = client.post(
-                        "/api/ewelink/devices/1000abcd12/primary-door",
-                        json={
-                            "host": "127.0.0.1",
-                            "port": 8081,
-                            "open_channel": 1,
-                            "close_channel": 2,
-                            "pulse_seconds": 1,
-                        },
-                    )
-
-            saved = database.settings()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn("primary-door-secret", response.text)
-        self.assertEqual(saved["ewelink_device_id"], "1000abcd12")
-        self.assertEqual(saved["ewelink_device_key"], "primary-door-secret")
-        self.assertEqual(saved["ewelink_open_channel"], 1)
-        self.assertEqual(saved["ewelink_close_channel"], 2)
-
-    def test_applying_primary_door_keeps_every_imported_device(self):
+    def test_applying_an_account_import_keeps_every_device(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "all-imported.db")
             settings = database.update_settings(DEFAULT_SETTINGS)
@@ -1375,29 +1437,20 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(imported_ids, {"1000abcd12", "1000ffff99"})
 
-    def test_new_installation_gets_an_editable_default_door_automation(self):
+    def test_new_installation_does_not_assume_a_device_or_automation(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "default-automation.db")
-            settings = database.update_settings({**DEFAULT_SETTINGS, "auto_close_seconds": 11})
+            settings = database.update_settings(DEFAULT_SETTINGS)
 
             VisionManager(database, _config(settings))
 
-            automations = database.automations()
-            self.assertEqual(len(automations), 1)
-            self.assertEqual(automations[0].name, "Default smart door")
-            wait = next(
-                step
-                for edge in automations[0].graph["edges"]
-                for step in edge.get("steps", [])
-                if step["type"] == "wait"
-            )
-            self.assertEqual(wait["seconds"], 11)
+            self.assertEqual(database.automations(), [])
 
-    def test_automation_api_validates_runs_and_persists_history(self):
+    def test_disabled_automation_allows_confirmed_manual_run_and_persists_history(self):
         graph = {
             "schema_version": 1,
             "name": "Manual log",
-            "enabled": True,
+            "enabled": False,
             "revision": 1,
             "max_concurrent_runs": 2,
             "nodes": [
@@ -1427,7 +1480,7 @@ class WebAccessTests(unittest.TestCase):
                 with TestClient(app) as client:
                     created = client.post(
                         "/api/automations",
-                        json={"name": "Manual log", "enabled": True, "graph": graph},
+                        json={"name": "Manual log", "enabled": False, "graph": graph},
                     )
                     automation_id = created.json()["id"]
                     listed = client.get("/api/automations")
@@ -1592,7 +1645,7 @@ class WebAccessTests(unittest.TestCase):
             "profileSamples",
         ):
             self.assertIn(f'id="{element_id}"', dashboard)
-        self.assertIn("Record samples", dashboard)
+        self.assertIn("Record samples", script)
         self.assertIn("/enrollment/start", script)
         self.assertIn("/api/enrollments/", script)
         self.assertIn("/api/profiles/", script)
@@ -1613,7 +1666,7 @@ class WebAccessTests(unittest.TestCase):
             "ewelinkDeviceList",
         ):
             self.assertIn(f'id="{element_id}"', dashboard)
-        self.assertIn("Use as Primary Door", script)
+        self.assertNotIn("Primary Door", script)
         self.assertIn("addCapabilityControls", script)
         self.assertIn("runEwelinkDeviceAction", script)
         self.assertIn('brightness.type = "range"', script)

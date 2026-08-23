@@ -36,11 +36,11 @@
       </section>
 
       <section class="automation-pane node-library">
-        <h2>Add a node</h2>
-        <label for="nodeKind">Type</label>
-        <select id="nodeKind" aria-label="Node type"></select>
-        <button id="addNode" class="btn" type="button">Add to canvas</button>
-        <p class="field-help">Connect nodes by selecting an output dot, then an input dot.</p>
+        <h2>Drag to canvas</h2>
+        <button class="node-template trigger" type="button" draggable="true" data-node-kind="trigger.manual"><strong>Trigger</strong><span>Starts a flow</span></button>
+        <button class="node-template condition" type="button" draggable="true" data-node-kind="condition.compare"><strong>Condition</strong><span>Chooses a path</span></button>
+        <button class="node-template action" type="button" draggable="true" data-node-kind="action.log"><strong>Action</strong><span>Controls a device</span></button>
+        <p class="field-help">Drop a type, then choose its behavior in Settings.</p>
       </section>
     </aside>
 
@@ -74,7 +74,7 @@
             <svg id="graphConnections" class="graph-connections" width="4000" height="3000" aria-label="Node connections"></svg>
             <div id="graphNodes" class="graph-nodes"></div>
           </div>
-          <div id="connectHint" class="connect-hint" hidden>Select the destination node</div>
+          <div id="connectHint" class="connect-hint" hidden>Select another connection point</div>
         </div>
       </div>
 

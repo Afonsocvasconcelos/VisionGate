@@ -203,6 +203,28 @@ class EWeLinkDeviceManagerTests(unittest.TestCase):
             self.assertTrue(calls[0].startswith("http://192.168.1.44:8081/"))
             self.assertTrue(calls[1].startswith("https://eu-apia.coolkit.cc/"))
 
+    def test_uncertain_button_on_still_attempts_the_safety_off(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "button-safety.db")
+            manager = EWeLinkDeviceManager(database, cloud=None)
+            manager.import_devices([four_channel_device()])
+            states = []
+
+            def send(_device, specification):
+                state = specification["params"]["switches"][0]["switch"]
+                states.append(state)
+                if state == "on":
+                    raise RuntimeError("request outcome is unknown")
+                return "lan"
+
+            manager._send = send
+            with self.assertRaises(RuntimeError):
+                manager.execute(
+                    "1000abcd12", "button", {"channel": 1, "pulse_seconds": 0.1}
+                )
+
+        self.assertEqual(states, ["on", "off"])
+
     def test_refresh_upserts_account_and_emits_property_and_online_changes(self):
         class Cloud:
             def token_devices(self, _app_id, _token, _region):
@@ -221,7 +243,7 @@ class EWeLinkDeviceManagerTests(unittest.TestCase):
             manager.refresh()
 
             kinds = [kind for kind, _payload in events]
-            self.assertIn("trigger.ewelink.offline", kinds)
+            self.assertIn("trigger.ewelink.connection", kinds)
             self.assertIn("trigger.ewelink.property_changed", kinds)
             self.assertIn(
                 (
@@ -265,7 +287,7 @@ class EWeLinkDeviceManagerTests(unittest.TestCase):
             self.assertFalse(device.online)
             self.assertEqual(
                 [kind for kind, _payload in events],
-                ["trigger.ewelink.property_changed", "trigger.ewelink.offline"],
+                ["trigger.ewelink.property_changed", "trigger.ewelink.connection"],
             )
             self.assertEqual(events[0][1]["property"], "channel_1")
             self.assertEqual(events[0][1]["value"], "on")

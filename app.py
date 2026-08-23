@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -34,7 +35,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from auth import AuthManager, TooManyAttempts
-from automation import AutomationEngine, GraphValidationError, default_door_graph, validate_graph
+from automation import AutomationEngine, GraphValidationError, validate_graph
 from core import (
     AccessGate,
     Camera,
@@ -741,26 +742,15 @@ def authorized_presence_events(
         new = current.get(track_id)
         if new is None or new.profile.id != old.profile.id:
             events.append(
-                ("trigger.camera.authorized_disappeared", payload(track_id, old))
+                ("trigger.camera.authorized_presence", {**payload(track_id, old), "present": False})
             )
     for track_id in sorted(current):
         new = current[track_id]
         old = previous.get(track_id)
         if old is None or old.profile.id != new.profile.id:
             events.append(
-                ("trigger.camera.authorized_appeared", payload(track_id, new))
+                ("trigger.camera.authorized_presence", {**payload(track_id, new), "present": True})
             )
-    if previous and not current:
-        events.append(
-            (
-                "trigger.camera.no_authorized_present",
-                {
-                    "camera_id": camera.id,
-                    "camera_name": camera.name,
-                    "authorized_count": 0,
-                },
-            )
-        )
     return events
 
 
@@ -771,15 +761,15 @@ def object_class_events(
     for label in sorted(current - previous):
         events.append(
             (
-                "trigger.camera.class_appeared",
-                {"camera_id": camera.id, "camera_name": camera.name, "label": label},
+                "trigger.camera.class_presence",
+                {"camera_id": camera.id, "camera_name": camera.name, "label": label, "present": True},
             )
         )
     for label in sorted(previous - current):
         events.append(
             (
-                "trigger.camera.class_disappeared",
-                {"camera_id": camera.id, "camera_name": camera.name, "label": label},
+                "trigger.camera.class_presence",
+                {"camera_id": camera.id, "camera_name": camera.name, "label": label, "present": False},
             )
         )
     return events
@@ -896,16 +886,16 @@ class VisionSystem:
             self.camera_state = state
         if state == "connected" and previous != "connected":
             self._emit(
-                "trigger.camera.online",
-                {"camera_id": self.camera.id, "camera_name": self.camera.name},
+                "trigger.camera.connection",
+                {"camera_id": self.camera.id, "camera_name": self.camera.name, "online": True},
             )
         elif state in {"unavailable", "reconnecting"} and previous not in {
             "unavailable",
             "reconnecting",
         }:
             self._emit(
-                "trigger.camera.offline",
-                {"camera_id": self.camera.id, "camera_name": self.camera.name},
+                "trigger.camera.connection",
+                {"camera_id": self.camera.id, "camera_name": self.camera.name, "online": False},
             )
 
     def _publish_scene(
@@ -1216,13 +1206,6 @@ class VisionManager:
     def __init__(self, database: Database, config: Config):
         self.database = database
         self.config = config
-        self.door = DoorController(config, database)
-        if not database.automations():
-            database.create_automation(
-                "Default smart door",
-                default_door_graph(config.auto_close_seconds),
-                enabled=True,
-            )
         self.automation = AutomationEngine(
             database, self._automation_action, self._automation_state
         )
@@ -1242,7 +1225,6 @@ class VisionManager:
             return self.workers.get(camera_id)
 
     def start(self) -> None:
-        self.door.start()
         self.automation.start()
         self.devices.start()
         self.enrollments.start_service()
@@ -1271,7 +1253,6 @@ class VisionManager:
         self.stop()
         self.devices.stop()
         self.automation.stop()
-        self.door.stop()
 
     def emit_event(self, kind: str, payload: dict) -> None:
         try:
@@ -1291,8 +1272,6 @@ class VisionManager:
         }
 
     def _automation_state(self, field: str, config: dict, _context: dict):
-        if field == "state.door":
-            return self.door.status()["state"]
         if field in {"state.camera_online", "state.authorized_count"}:
             with self.lock:
                 if config.get("camera_id") == "*":
@@ -1318,28 +1297,6 @@ class VisionManager:
             self.database.add_event("automation_log", message)
             log.info("Automation: %s", message)
             return {"logged": True}
-        if kind.startswith("action.primary_door."):
-            action = kind.rsplit(".", 1)[1]
-            if action == "query":
-                self.door.refresh_state()
-                return self.door.status()
-            if not self.door.configured:
-                raise RuntimeError("Primary Door is not configured")
-            target = "open" if action == "open" else "closed"
-            if self.door.status()["state"] == target and not self.door.busy:
-                return {"state": target, "unchanged": True}
-            event = context.get("event", {})
-            reason = str(event.get("profile_name") or event.get("kind") or "automation")
-            if not self.door.trigger(reason, action=action):
-                raise RuntimeError("Primary Door is busy or cooling down")
-            deadline = time.monotonic() + 45
-            while self.door.busy and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if self.door.busy:
-                raise RuntimeError("Primary Door command timed out")
-            if self.door.last_error:
-                raise RuntimeError(self.door.last_error)
-            return self.door.status()
         if kind.startswith("action.ewelink."):
             action = kind.rsplit(".", 1)[1]
             arguments = {key: value for key, value in config.items() if key != "device_id"}
@@ -1398,9 +1355,7 @@ class VisionManager:
         old_config = self.config
         candidate = {**self.database.settings(), **values}
         new_config = _config(candidate)
-        DoorController._validate(new_config)
         settings = self.database.update_settings(values)
-        self.door.update(new_config)
         self.config = new_config
         vision_changed = (
             old_config.performance_mode,
@@ -1498,7 +1453,6 @@ class VisionManager:
         sample_counts = self.database.profile_sample_counts()
         return {
             "cameras": cameras,
-            "door": self.door.status(),
             "model": self.config.yolo_model,
             "threshold": self.config.match_threshold,
             "margin": self.config.match_margin,
@@ -1555,11 +1509,6 @@ class EnrollmentCommit(BaseModel):
         return self
 
 
-class DoorTest(BaseModel):
-    confirm: bool
-    action: str = Field(default="open", pattern=r"^(open|close)$")
-
-
 class CameraPayload(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     stream_url: str = Field(min_length=8, max_length=1000)
@@ -1600,38 +1549,11 @@ class SettingsPayload(BaseModel):
     match_confirmations: int = Field(ge=1, le=20)
     open_cooldown_seconds: float = Field(ge=0, le=3600)
     jpeg_quality: int = Field(ge=40, le=100)
-    ewelink_model: str = Field(min_length=1, max_length=80)
-    ewelink_host: str = Field(default="", max_length=45)
-    ewelink_port: int = Field(ge=1, le=65535)
-    ewelink_device_id: str = Field(
-        default="", max_length=32, pattern=r"^$|^[A-Za-z0-9]{6,32}$"
-    )
-    ewelink_device_key: str = Field(default="", max_length=128)
-    ewelink_open_channel: int = Field(ge=1, le=4)
-    ewelink_close_channel: int = Field(ge=1, le=4)
-    pulse_seconds: float = Field(ge=0.1, le=30)
-    auto_close_seconds: float | None = Field(default=None, ge=0, le=3600)
-
     @model_validator(mode="after")
-    def valid_door(self):
+    def valid_settings(self):
         self.app_name = self.app_name.strip()
-        self.ewelink_model = self.ewelink_model.strip()
-        self.ewelink_host = self.ewelink_host.strip()
-        self.ewelink_device_id = self.ewelink_device_id.strip()
-        self.ewelink_device_key = self.ewelink_device_key.strip()
         if not self.app_name:
             raise ValueError("app name cannot be blank")
-        if not self.ewelink_model:
-            raise ValueError("eWeLink model cannot be blank")
-        if self.ewelink_open_channel == self.ewelink_close_channel:
-            raise ValueError("open and close channels must be different")
-        if self.ewelink_host:
-            try:
-                address = ipaddress.ip_address(self.ewelink_host)
-            except ValueError as error:
-                raise ValueError("eWeLink host must be a local IP address") from error
-            if not (address.is_private or address.is_loopback):
-                raise ValueError("eWeLink host must be on the local network")
         return self
 
 
@@ -1692,29 +1614,6 @@ class EWeLinkTestPayload(EWeLinkActionPayload):
     action: str = Field(pattern=r"^(switch|button|light|cover|number|enum|refresh)$")
 
 
-class PrimaryDoorPayload(BaseModel):
-    host: str = Field(default="", max_length=45)
-    port: int = Field(default=8081, ge=1, le=65535)
-    open_channel: int = Field(default=1, ge=1, le=4)
-    close_channel: int = Field(default=2, ge=1, le=4)
-    pulse_seconds: float = Field(default=1, ge=0.1, le=30)
-
-    @model_validator(mode="after")
-    def valid_primary_door(self):
-        if self.open_channel == self.close_channel:
-            raise ValueError("open and close channels must be different")
-        self.host = self.host.strip()
-        if self.host:
-            try:
-                address = ipaddress.ip_address(self.host)
-            except ValueError as error:
-                raise ValueError("relay host must be a local IP address") from error
-            if not (address.is_private or address.is_loopback):
-                raise ValueError("relay host must be on the local network")
-            self.host = str(address)
-        return self
-
-
 class AutomationPayload(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     enabled: bool = False
@@ -1732,6 +1631,26 @@ class AutomationPayload(BaseModel):
 
 class AutomationValidationPayload(BaseModel):
     graph: dict
+
+
+class DashboardAutomationPayload(BaseModel):
+    automation_id: int = Field(ge=1)
+
+
+class DashboardModulesPayload(DashboardAutomationPayload):
+    modules: list[str] = Field(max_length=64)
+
+    @field_validator("modules")
+    @classmethod
+    def valid_modules(cls, modules: list[str]) -> list[str]:
+        if len(modules) != len(set(modules)):
+            raise ValueError("dashboard modules cannot be duplicated")
+        if any(
+            not re.fullmatch(r"(?:manual|camera:[1-9][0-9]*|ewelink:[A-Za-z0-9]{6,32})", module)
+            for module in modules
+        ):
+            raise ValueError("dashboard module is invalid")
+        return modules
 
 
 class ConfirmedAutomationRun(BaseModel):
@@ -2058,14 +1977,23 @@ def _public_camera(camera: Camera) -> dict:
 
 def _public_settings(settings: dict) -> dict:
     public = dict(settings)
-    public["ewelink_device_key_configured"] = bool(public.get("ewelink_device_key"))
     for key in (
+        "ewelink_model",
+        "ewelink_host",
+        "ewelink_port",
+        "ewelink_device_id",
         "ewelink_device_key",
+        "ewelink_open_channel",
+        "ewelink_close_channel",
+        "pulse_seconds",
+        "auto_close_seconds",
         "ewelink_cloud_token",
         "ewelink_cloud_app_id",
         "ewelink_cloud_region",
         "ewelink_cloud_user_apikey",
         "door_last_state",
+        "door_last_command",
+        "dashboard_layouts",
     ):
         public.pop(key, None)
     return public
@@ -2124,45 +2052,6 @@ def ewelink_device(device_id: str):
     return MANAGER.devices.public(device)
 
 
-@app.post("/api/ewelink/devices/{device_id}/primary-door")
-def use_ewelink_device_as_primary_door(
-    device_id: str, payload: PrimaryDoorPayload
-):
-    device = MANAGER.database.ewelink_device(device_id)
-    if not device:
-        raise HTTPException(404, "eWeLink device not found")
-    channels = next(
-        (
-            capability.get("channels", [])
-            for capability in device.capabilities
-            if capability.get("type") == "channels"
-        ),
-        [],
-    )
-    if payload.open_channel not in channels or payload.close_channel not in channels:
-        raise HTTPException(422, "Select open and close channels supported by this device")
-    try:
-        settings = MANAGER.update_settings(
-            {
-                "ewelink_model": device.model or device.name,
-                "ewelink_host": payload.host or device.host,
-                "ewelink_port": payload.port,
-                "ewelink_device_id": device.device_id,
-                "ewelink_device_key": device.device_key,
-                "ewelink_open_channel": payload.open_channel,
-                "ewelink_close_channel": payload.close_channel,
-                "pulse_seconds": payload.pulse_seconds,
-            }
-        )
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-    return {
-        "configured": True,
-        "device": MANAGER.devices.public(device),
-        "settings": _public_settings(settings),
-    }
-
-
 def _run_ewelink_action(
     device_id: str, action: str, payload: EWeLinkActionPayload
 ):
@@ -2204,6 +2093,96 @@ def _validated_automation(graph: dict) -> dict:
 @app.get("/api/automations")
 def automations():
     return [asdict(item) for item in MANAGER.database.automations()]
+
+
+def _dashboard_available_modules(automation) -> list[str]:
+    cameras = {camera.id for camera in MANAGER.database.cameras()}
+    devices = {device.device_id for device in MANAGER.database.ewelink_devices()}
+    modules: list[str] = []
+
+    def add(module: str) -> None:
+        if module not in modules:
+            modules.append(module)
+
+    for node in automation.graph["nodes"]:
+        config = node.get("config", {})
+        if node["kind"] == "trigger.manual":
+            add("manual")
+        camera_id = config.get("camera_id")
+        if camera_id == "*":
+            for item in sorted(cameras):
+                add(f"camera:{item}")
+        elif camera_id in cameras:
+            add(f"camera:{camera_id}")
+        device_id = config.get("device_id")
+        if device_id in devices:
+            add(f"ewelink:{device_id}")
+    return modules
+
+
+def _dashboard_layouts() -> dict[str, list[str]]:
+    layouts = MANAGER.database.settings().get("dashboard_layouts", {})
+    return layouts if isinstance(layouts, dict) else {}
+
+
+def _dashboard_payload(selected_id: int | None = None) -> dict:
+    items = MANAGER.database.automations()
+    if selected_id is None:
+        selected_id = int(MANAGER.database.settings().get("dashboard_automation_id") or 0)
+    selected = next((item for item in items if item.id == selected_id), items[0] if items else None)
+    available = _dashboard_available_modules(selected) if selected else []
+    saved = _dashboard_layouts().get(str(selected.id)) if selected else None
+    modules = [module for module in saved if module in available] if isinstance(saved, list) else available
+    return {
+        "selected_id": selected.id if selected else None,
+        "selected": None
+        if not selected
+        else {
+            "id": selected.id,
+            "name": selected.name,
+            "enabled": selected.enabled,
+            "revision": selected.revision,
+            "has_manual_trigger": "manual" in available,
+            "graph": selected.graph,
+        },
+        "available_modules": available,
+        "modules": modules,
+        "automations": [
+            {"id": item.id, "name": item.name, "enabled": item.enabled}
+            for item in items
+        ],
+    }
+
+
+@app.get("/api/dashboard/automation")
+def dashboard_automation():
+    return _dashboard_payload()
+
+
+@app.put("/api/dashboard/automation")
+def select_dashboard_automation(payload: DashboardAutomationPayload):
+    if not MANAGER.database.automation(payload.automation_id):
+        raise HTTPException(404, "Automation not found")
+    MANAGER.database.update_settings({"dashboard_automation_id": payload.automation_id})
+    return _dashboard_payload(payload.automation_id)
+
+
+@app.put("/api/dashboard/automation/modules")
+def save_dashboard_modules(payload: DashboardModulesPayload):
+    automation = MANAGER.database.automation(payload.automation_id)
+    if not automation:
+        raise HTTPException(404, "Automation not found")
+    available = _dashboard_available_modules(automation)
+    if any(module not in available for module in payload.modules):
+        raise HTTPException(422, "Dashboard can only contain devices used by this automation")
+    layouts = _dashboard_layouts()
+    layouts[str(automation.id)] = payload.modules
+    MANAGER.database.update_settings({"dashboard_layouts": layouts})
+    return {
+        "automation_id": automation.id,
+        "available_modules": available,
+        "modules": payload.modules,
+    }
 
 
 @app.post("/api/automations/validate")
@@ -2255,6 +2234,11 @@ def update_automation(automation_id: int, payload: AutomationPayload):
 def delete_automation(automation_id: int):
     if not MANAGER.database.delete_automation(automation_id):
         raise HTTPException(404, "Automation not found")
+    if MANAGER.database.settings().get("dashboard_automation_id") == automation_id:
+        MANAGER.database.update_settings({"dashboard_automation_id": 0})
+    layouts = _dashboard_layouts()
+    if layouts.pop(str(automation_id), None) is not None:
+        MANAGER.database.update_settings({"dashboard_layouts": layouts})
     MANAGER.automation.initialize_schedules()
     return {"deleted": True}
 
@@ -2357,12 +2341,6 @@ def delete_camera(camera_id: int):
 def update_settings(payload: SettingsPayload):
     try:
         values = payload.model_dump(exclude_none=True)
-        current = DATABASE.settings()
-        if not values["ewelink_device_key"]:
-            if values["ewelink_device_id"] == current.get("ewelink_device_id"):
-                values.pop("ewelink_device_key")
-            elif values["ewelink_device_id"]:
-                raise ValueError("Enter the device key when changing the device ID")
         return _public_settings(MANAGER.update_settings(values))
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
@@ -2435,36 +2413,16 @@ def ewelink_password_import(payload: EWeLinkPasswordImport, request: Request):
         raise HTTPException(400, str(error)) from error
     if not devices:
         raise HTTPException(404, "No compatible eWeLink devices were returned")
+    MANAGER.devices.import_devices(devices)
     session_id = EWELINK_IMPORTS.ready(devices)
-    return {"session_id": session_id, **EWELINK_IMPORTS.status(session_id)}
+    return {"session_id": session_id, "persisted": True, **EWELINK_IMPORTS.status(session_id)}
 
 
 @app.post("/api/ewelink/import/apply")
 def ewelink_import_apply(payload: EWeLinkImportApply):
     try:
         device, devices = EWELINK_IMPORTS.take_all(payload.session_id, payload.device_id)
-        discovered_host = str(device.get("host") or "")
-        selected_host = discovered_host or (
-            "" if device.get("_cloud_token") else payload.host
-        )
-        selected_port = payload.port or int(device.get("port") or 8081)
-        device["host"], device["port"] = selected_host, selected_port
         MANAGER.devices.import_devices(devices)
-        MANAGER.update_settings(
-            {
-                "ewelink_model": device["model"],
-                "ewelink_host": selected_host,
-                "ewelink_port": selected_port,
-                "ewelink_device_id": device["id"],
-                "ewelink_device_key": device["device_key"],
-                "ewelink_cloud_token": device.get("_cloud_token", ""),
-                "ewelink_cloud_app_id": device.get("_cloud_app_id", ""),
-                "ewelink_cloud_region": device.get("_cloud_region", ""),
-                "ewelink_open_channel": payload.open_channel,
-                "ewelink_close_channel": payload.close_channel,
-                "pulse_seconds": payload.pulse_seconds,
-            }
-        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -2473,7 +2431,7 @@ def ewelink_import_apply(payload: EWeLinkImportApply):
         "configured": True,
         "device_id": device["id"],
         "name": device["name"],
-        "mode": "lan" if selected_host else "cloud",
+        "device_count": len(devices),
     }
 
 
@@ -2642,31 +2600,3 @@ def events(limit: int = Query(100, ge=1, le=1000)):
 @app.delete("/api/events")
 def clear_events():
     return {"deleted": DATABASE.clear_events()}
-
-
-@app.post("/api/door/refresh")
-def refresh_door_state():
-    try:
-        MANAGER.devices.refresh()
-    except Exception:
-        log.warning("eWeLink inventory refresh failed during door state check")
-    MANAGER.door.refresh_state()
-    return MANAGER.door.status()
-
-
-@app.post("/api/door/test")
-def test_door(request: DoorTest):
-    if not request.confirm:
-        raise HTTPException(400, "Confirmation required")
-    if not MANAGER.door.configured:
-        raise HTTPException(503, "Door integration is not configured")
-    if not MANAGER.door.trigger(f"manual {request.action} test", action=request.action):
-        raise HTTPException(409, "Door controller is busy or cooling down")
-    deadline = time.monotonic() + 45
-    while MANAGER.door.busy and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if MANAGER.door.busy:
-        raise HTTPException(504, "Door command timed out; check the relay state")
-    if MANAGER.door.last_error:
-        raise HTTPException(502, MANAGER.door.last_error)
-    return {"completed": True, "action": request.action}

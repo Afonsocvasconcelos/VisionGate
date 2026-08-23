@@ -10,23 +10,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 TRIGGER_KINDS = {
-    "trigger.camera.authorized_appeared",
-    "trigger.camera.authorized_disappeared",
-    "trigger.camera.no_authorized_present",
-    "trigger.camera.class_appeared",
-    "trigger.camera.class_disappeared",
-    "trigger.camera.online",
-    "trigger.camera.offline",
+    "trigger.camera.authorized_presence",
+    "trigger.camera.class_presence",
+    "trigger.camera.connection",
     "trigger.ewelink.property_changed",
-    "trigger.ewelink.online",
-    "trigger.ewelink.offline",
+    "trigger.ewelink.connection",
     "trigger.manual",
     "trigger.schedule",
 }
 ACTION_KINDS = {
-    "action.primary_door.open",
-    "action.primary_door.close",
-    "action.primary_door.query",
     "action.ewelink.switch",
     "action.ewelink.button",
     "action.ewelink.light",
@@ -60,18 +52,22 @@ GRAPH_FIELDS = {
 
 
 def _config_fields(kind: str, config: dict) -> set[str]:
-    if kind == "trigger.manual" or kind.startswith("action.primary_door."):
+    if kind == "trigger.manual":
         return set()
     if kind == "trigger.schedule":
         return {"mode", "time", "weekdays", "timezone"} if config.get("mode") == "time" else {"mode", "value", "unit"}
     if kind in CAMERA_TRIGGERS | CAMERA_ACTIONS:
-        return {"camera_id", "label"} if kind in {
-            "trigger.camera.class_appeared", "trigger.camera.class_disappeared"
-        } else {"camera_id"}
+        if kind == "trigger.camera.class_presence":
+            return {"camera_id", "label", "present"}
+        if kind == "trigger.camera.authorized_presence":
+            return {"camera_id", "present"}
+        if kind == "trigger.camera.connection":
+            return {"camera_id", "online"}
+        return {"camera_id"}
     if kind in EWELINK_TRIGGERS:
-        return {"device_id", "property"} if kind == "trigger.ewelink.property_changed" else {"device_id"}
+        return {"device_id", "property"} if kind == "trigger.ewelink.property_changed" else {"device_id", "online"}
     if kind == "condition.compare":
-        fields = {"field", "operator", "value"}
+        fields = {"field", "operator", "value", "value_type"}
         if config.get("field") in {"state.camera_online", "state.authorized_count"}:
             fields.add("camera_id")
         if config.get("field") in {"state.ewelink_property", "state.ewelink_online"}:
@@ -231,7 +227,6 @@ def _validate_condition(config: dict, issues: list[str], resources: dict | None)
         "event.profile_id": "number",
         "state.camera_online": "boolean",
         "state.authorized_count": "number",
-        "state.door": "text",
         "state.ewelink_property": "dynamic",
         "state.ewelink_online": "boolean",
     }
@@ -243,6 +238,12 @@ def _validate_condition(config: dict, issues: list[str], resources: dict | None)
         issues.append("condition field is invalid")
         return
     value = config.get("value")
+    declared_type = config.setdefault(
+        "value_type",
+        "boolean" if type(value) is bool else "number" if isinstance(value, (int, float)) else "string",
+    )
+    if declared_type not in {"boolean", "number", "string"}:
+        issues.append("condition value type must be boolean, number, or string")
     if value_type == "boolean" and type(value) is not bool:
         issues.append("condition value must be true or false")
     elif value_type == "number" and (not isinstance(value, (int, float)) or type(value) is bool):
@@ -258,13 +259,16 @@ def _validate_condition(config: dict, issues: list[str], resources: dict | None)
         if isinstance(value, str)
         else "invalid"
     )
+    declared_internal = {"boolean": "boolean", "number": "number", "string": "text"}.get(declared_type)
+    if declared_internal and actual_type != declared_internal:
+        issues.append(f"condition value must match its {declared_type} type")
     operators = {
         "boolean": {"equals", "not_equals"},
         "number": {"equals", "not_equals", "greater", "greater_or_equal", "less", "less_or_equal"},
         "text": {"equals", "not_equals"},
         "invalid": set(),
     }
-    operator_type = actual_type if value_type == "dynamic" else value_type
+    operator_type = declared_internal if value_type == "dynamic" else value_type
     if config.get("operator") not in operators.get(operator_type, set()):
         issues.append("condition operator is invalid for its value type")
     if field in {"state.camera_online", "state.authorized_count"}:
@@ -307,9 +311,16 @@ def _validate_node(node: dict, issues: list[str], resources: dict | None) -> Non
             issues.append("camera node requires a camera")
         elif camera_id != "*":
             _reference_issue(issues, resources, "camera", camera_id)
-    if kind in {"trigger.camera.class_appeared", "trigger.camera.class_disappeared"}:
+    if kind == "trigger.camera.class_presence":
         if config.get("label") not in OBJECT_LABELS:
             issues.append("camera class trigger has an invalid object class")
+    if kind in {"trigger.camera.authorized_presence", "trigger.camera.class_presence"}:
+        if type(config.get("present")) is not bool:
+            issues.append("camera presence trigger must choose present or absent")
+    if kind == "trigger.camera.connection" and type(config.get("online")) is not bool:
+        issues.append("camera connection trigger must choose online or offline")
+    if kind == "trigger.ewelink.connection" and type(config.get("online")) is not bool:
+        issues.append("eWeLink connection trigger must choose online or offline")
     if kind in EWELINK_TRIGGERS | EWELINK_ACTIONS:
         device_id = config.get("device_id")
         if not isinstance(device_id, str) or not device_id:
@@ -454,7 +465,7 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
             issues.append("every edge needs a unique safe ID")
             continue
         edge_ids.add(edge_id)
-        if extra := set(edge) - {"id", "from", "to", "outcome", "steps"}:
+        if extra := set(edge) - {"id", "from", "to", "from_port", "to_port", "outcome", "steps"}:
             issues.append(f"edge {edge_id} contains unsupported field(s): {', '.join(sorted(extra))}")
         source, target = edge.get("from"), edge.get("to")
         if source not in node_map or target not in node_map:
@@ -467,6 +478,10 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
         undirected[target].add(source)
         indegree[target] += 1
         source_kind = node_map[source].get("kind")
+        for field, fallback in (("from_port", "right"), ("to_port", "left")):
+            edge.setdefault(field, fallback)
+            if edge[field] not in {"top", "right", "bottom", "left"}:
+                issues.append(f"edge {edge_id} {field} is invalid")
         expected = (
             {"true", "false"}
             if source_kind in CONDITION_KINDS
@@ -554,18 +569,24 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
     return graph
 
 
-def default_door_graph(auto_close_seconds: float) -> dict:
+def default_device_graph(
+    device_id: str,
+    auto_close_seconds: float,
+    open_channel: int = 1,
+    close_channel: int = 2,
+    pulse_seconds: float = 1,
+) -> dict:
     nodes = [
         {
             "id": "authorized-arrived",
-            "kind": "trigger.camera.authorized_appeared",
-            "config": {"camera_id": "*"},
+            "kind": "trigger.camera.authorized_presence",
+            "config": {"camera_id": "*", "present": True},
             "position": {"x": 40, "y": 60},
         },
         {
             "id": "open-door",
-            "kind": "action.primary_door.open",
-            "config": {},
+            "kind": "action.ewelink.button",
+            "config": {"device_id": device_id, "channel": open_channel, "pulse_seconds": pulse_seconds},
             "position": {"x": 360, "y": 60},
         },
     ]
@@ -574,6 +595,8 @@ def default_door_graph(auto_close_seconds: float) -> dict:
             "id": "authorized-open",
             "from": "authorized-arrived",
             "to": "open-door",
+            "from_port": "right",
+            "to_port": "left",
             "outcome": "success",
             "steps": [],
         }
@@ -583,8 +606,8 @@ def default_door_graph(auto_close_seconds: float) -> dict:
             [
                 {
                     "id": "authorized-left",
-                    "kind": "trigger.camera.no_authorized_present",
-                    "config": {"camera_id": "*"},
+                    "kind": "trigger.camera.authorized_presence",
+                    "config": {"camera_id": "*", "present": False},
                     "position": {"x": 40, "y": 260},
                 },
                 {
@@ -594,14 +617,15 @@ def default_door_graph(auto_close_seconds: float) -> dict:
                         "field": "state.authorized_count",
                         "operator": "equals",
                         "value": 0,
+                        "value_type": "number",
                         "camera_id": "*",
                     },
                     "position": {"x": 360, "y": 260},
                 },
                 {
                     "id": "close-door",
-                    "kind": "action.primary_door.close",
-                    "config": {},
+                    "kind": "action.ewelink.button",
+                    "config": {"device_id": device_id, "channel": close_channel, "pulse_seconds": pulse_seconds},
                     "position": {"x": 620, "y": 260},
                 },
             ]
@@ -612,6 +636,8 @@ def default_door_graph(auto_close_seconds: float) -> dict:
                     "id": "left-wait-check",
                     "from": "authorized-left",
                     "to": "still-away",
+                    "from_port": "right",
+                    "to_port": "left",
                     "outcome": "success",
                     "steps": [{"type": "wait", "seconds": auto_close_seconds}],
                 },
@@ -619,6 +645,8 @@ def default_door_graph(auto_close_seconds: float) -> dict:
                     "id": "still-away-close",
                     "from": "still-away",
                     "to": "close-door",
+                    "from_port": "right",
+                    "to_port": "left",
                     "outcome": "true",
                     "steps": [],
                 },
@@ -626,13 +654,79 @@ def default_door_graph(auto_close_seconds: float) -> dict:
         )
     return {
         "schema_version": 1,
-        "name": "Default smart door",
+        "name": "Door access",
         "enabled": True,
         "revision": 1,
         "max_concurrent_runs": 4,
         "nodes": nodes,
         "edges": edges,
     }
+
+
+def upgrade_automation_graph(graph: dict, settings: dict) -> tuple[dict, bool]:
+    """Convert legacy single-door graphs to general device automations."""
+    upgraded = json.loads(json.dumps(graph))
+    changed = False
+    device_id = str(settings.get("ewelink_device_id") or "").strip()
+    pulse = float(settings.get("pulse_seconds") or 1)
+    trigger_kinds = {
+        "trigger.camera.authorized_appeared": ("trigger.camera.authorized_presence", {"present": True}),
+        "trigger.camera.authorized_disappeared": ("trigger.camera.authorized_presence", {"present": False}),
+        "trigger.camera.no_authorized_present": ("trigger.camera.authorized_presence", {"present": False}),
+        "trigger.camera.class_appeared": ("trigger.camera.class_presence", {"present": True}),
+        "trigger.camera.class_disappeared": ("trigger.camera.class_presence", {"present": False}),
+        "trigger.camera.online": ("trigger.camera.connection", {"online": True}),
+        "trigger.camera.offline": ("trigger.camera.connection", {"online": False}),
+        "trigger.ewelink.online": ("trigger.ewelink.connection", {"online": True}),
+        "trigger.ewelink.offline": ("trigger.ewelink.connection", {"online": False}),
+    }
+    for node in upgraded.get("nodes", []):
+        kind = node.get("kind")
+        config = node.setdefault("config", {})
+        if kind in trigger_kinds:
+            node["kind"], extra = trigger_kinds[kind]
+            config.update(extra)
+            changed = True
+        elif isinstance(kind, str) and kind.startswith("action.primary_door."):
+            action = kind.rsplit(".", 1)[1]
+            if device_id:
+                if action == "query":
+                    node["kind"], node["config"] = "action.ewelink.refresh", {"device_id": device_id}
+                else:
+                    channel = settings.get(f"ewelink_{action}_channel", 1 if action == "open" else 2)
+                    node["kind"], node["config"] = "action.ewelink.button", {
+                        "device_id": device_id,
+                        "channel": int(channel),
+                        "pulse_seconds": pulse,
+                    }
+            else:
+                node["kind"], node["config"] = "action.log", {
+                    "message": "Connect a device and choose its channel for this action"
+                }
+            changed = True
+        if node.get("kind") == "condition.compare":
+            if config.get("field") == "state.door":
+                if device_id:
+                    config.update(field="state.ewelink_property", device_id=device_id, property="door")
+                else:
+                    config["field"] = "variable.device_state"
+                changed = True
+            value = config.get("value")
+            value_type = "boolean" if type(value) is bool else "number" if isinstance(value, (int, float)) else "string"
+            if "value_type" not in config:
+                config["value_type"] = value_type
+                changed = True
+    for edge in upgraded.get("edges", []):
+        if "from_port" not in edge:
+            edge["from_port"] = "right"
+            changed = True
+        if "to_port" not in edge:
+            edge["to_port"] = "left"
+            changed = True
+    if upgraded.get("name") == "Default smart door":
+        upgraded["name"] = "Door access"
+        changed = True
+    return upgraded, changed
 
 
 class _RunCanceled(RuntimeError):
@@ -669,8 +763,6 @@ class AutomationEngine:
             return sum(self._active.values())
 
     def _resource_key(self, kind: str, config: dict) -> str | None:
-        if kind.startswith("action.primary_door."):
-            return "door:primary"
         if kind.startswith("action.ewelink."):
             return f"ewelink:{config.get('device_id', '')}"
         if kind.startswith("action.camera."):
@@ -685,10 +777,11 @@ class AutomationEngine:
         if event_kind.startswith("trigger.camera."):
             if config.get("camera_id") not in {"*", payload.get("camera_id")}:
                 return False
-            if event_kind in {
-                "trigger.camera.class_appeared",
-                "trigger.camera.class_disappeared",
-            } and config.get("label") != payload.get("label"):
+            if event_kind == "trigger.camera.class_presence" and config.get("label") != payload.get("label"):
+                return False
+            if event_kind in {"trigger.camera.authorized_presence", "trigger.camera.class_presence"} and config.get("present") != payload.get("present"):
+                return False
+            if event_kind == "trigger.camera.connection" and config.get("online") != payload.get("online"):
                 return False
         if event_kind.startswith("trigger.ewelink."):
             if config.get("device_id") != payload.get("device_id"):
@@ -697,6 +790,8 @@ class AutomationEngine:
                 event_kind == "trigger.ewelink.property_changed"
                 and config.get("property") != payload.get("property")
             ):
+                return False
+            if event_kind == "trigger.ewelink.connection" and config.get("online") != payload.get("online"):
                 return False
         if event_kind == "trigger.schedule" and payload.get("trigger_node_id"):
             return node["id"] == payload["trigger_node_id"]
@@ -731,8 +826,6 @@ class AutomationEngine:
         automation = self.database.automation(automation_id)
         if not automation:
             raise KeyError("Automation not found")
-        if not automation.enabled and not dry_run:
-            raise ValueError("Automation is disabled")
         starts = [
             node["id"]
             for node in automation.graph["nodes"]

@@ -13,8 +13,9 @@ from core import Database, best_match
 from automation import (
     AutomationEngine,
     GraphValidationError,
-    default_door_graph,
+    default_device_graph,
     next_schedule,
+    upgrade_automation_graph,
     validate_graph,
 )
 from ewelink_cloud import device_capabilities
@@ -112,7 +113,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             )
             self.assertEqual(wait["seconds"], 12)
 
-    def test_failed_legacy_migration_rolls_back_all_additive_tables(self):
+    def test_legacy_install_without_a_device_does_not_create_an_invalid_automation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "visiongate.db"
             connection = sqlite3.connect(path)
@@ -132,8 +133,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            with self.assertRaises(ValueError):
-                Database(path)
+            database = Database(path)
 
             connection = sqlite3.connect(path)
             try:
@@ -145,15 +145,16 @@ class DatabaseMigrationTests(unittest.TestCase):
                 }
             finally:
                 connection.close()
-            self.assertNotIn("profile_samples", tables)
-            self.assertNotIn("ewelink_devices", tables)
-            self.assertNotIn("automations", tables)
+            self.assertIn("profile_samples", tables)
+            self.assertIn("ewelink_devices", tables)
+            self.assertIn("automations", tables)
+            self.assertEqual(database.automations(), [])
 
     def test_existing_default_automation_is_upgraded_to_global_presence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "visiongate.db"
             database = Database(path)
-            old_graph = default_door_graph(5)
+            old_graph = default_device_graph("1000aaaa11", 5)
             condition = next(node for node in old_graph["nodes"] if node["id"] == "still-away")
             condition["config"]["camera_id"] = "event"
             automation = database.create_automation("Default smart door", old_graph, True)
@@ -310,6 +311,79 @@ class EWeLinkInventoryPersistenceTests(unittest.TestCase):
 
 
 class AutomationGraphTests(unittest.TestCase):
+    def test_generalized_boolean_triggers_typed_conditions_and_ports_are_saved(self):
+        graph = self.graph(
+            [
+                {
+                    "id": "presence",
+                    "kind": "trigger.camera.authorized_presence",
+                    "config": {"camera_id": 3, "present": False},
+                },
+                {
+                    "id": "condition",
+                    "kind": "condition.compare",
+                    "config": {
+                        "field": "variable.allowed",
+                        "operator": "equals",
+                        "value": True,
+                        "value_type": "boolean",
+                    },
+                },
+            ],
+            [
+                {
+                    "id": "presence-condition",
+                    "from": "presence",
+                    "to": "condition",
+                    "from_port": "bottom",
+                    "to_port": "top",
+                    "outcome": "success",
+                    "steps": [{"type": "wait", "seconds": 3}],
+                }
+            ],
+        )
+
+        validated = validate_graph(graph, {"camera_ids": {3}})
+
+        self.assertEqual(validated["edges"][0]["from_port"], "bottom")
+        self.assertEqual(validated["edges"][0]["to_port"], "top")
+        self.assertEqual(validated["nodes"][1]["config"]["value_type"], "boolean")
+
+        graph["nodes"][1]["config"]["value_type"] = "string"
+        with self.assertRaisesRegex(GraphValidationError, "match its string type"):
+            validate_graph(graph, {"camera_ids": {3}})
+
+    def test_legacy_door_graph_is_migrated_to_device_actions_and_boolean_presence(self):
+        legacy = {
+            "schema_version": 1,
+            "name": "Default smart door",
+            "enabled": True,
+            "revision": 1,
+            "max_concurrent_runs": 4,
+            "nodes": [
+                {"id": "presence", "kind": "trigger.camera.authorized_appeared", "config": {"camera_id": "*"}},
+                {"id": "open", "kind": "action.primary_door.open", "config": {}},
+            ],
+            "edges": [{"id": "open", "from": "presence", "to": "open", "outcome": "success", "steps": []}],
+        }
+
+        upgraded, changed = upgrade_automation_graph(
+            legacy,
+            {
+                "ewelink_device_id": "1000abcd12",
+                "ewelink_open_channel": 1,
+                "ewelink_close_channel": 2,
+                "pulse_seconds": 0.5,
+            },
+        )
+
+        self.assertTrue(changed)
+        self.assertNotIn("primary_door", json.dumps(upgraded))
+        kinds = {node["kind"] for node in upgraded["nodes"]}
+        self.assertIn("trigger.camera.authorized_presence", kinds)
+        self.assertIn("action.ewelink.button", kinds)
+        self.assertTrue(all("from_port" in edge and "to_port" in edge for edge in upgraded["edges"]))
+
     def test_graph_rejects_unknown_fields_and_unreachable_nodes(self):
         def valid_graph():
             return self.graph(
@@ -408,8 +482,8 @@ class AutomationGraphTests(unittest.TestCase):
                 },
                 {
                     "id": "open",
-                    "kind": "action.primary_door.open",
-                    "config": {},
+                    "kind": "action.log",
+                    "config": {"message": "Open"},
                     "position": {"x": 400, "y": 0},
                 },
             ],
@@ -546,8 +620,8 @@ class AutomationGraphTests(unittest.TestCase):
             [
                 {
                     "id": "camera",
-                    "kind": "trigger.camera.authorized_appeared",
-                    "config": {"camera_id": 99},
+                    "kind": "trigger.camera.authorized_presence",
+                    "config": {"camera_id": 99, "present": True},
                 },
                 {
                     "id": "condition",
@@ -712,7 +786,10 @@ class AutomationGraphTests(unittest.TestCase):
 
 class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
     @staticmethod
-    def manual_graph(action="action.primary_door.open", concurrency=4):
+    def manual_graph(action="action.log", concurrency=4):
+        config = {"message": "Run"} if action == "action.log" else {
+            "device_id": "device", "channel": 1, "pulse_seconds": 1
+        }
         return {
             "schema_version": 1,
             "name": "Manual test",
@@ -721,7 +798,7 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
             "max_concurrent_runs": concurrency,
             "nodes": [
                 {"id": "start", "kind": "trigger.manual", "config": {}},
-                {"id": "action", "kind": action, "config": {}},
+                {"id": "action", "kind": action, "config": config},
             ],
             "edges": [
                 {
@@ -812,8 +889,8 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
             "nodes": [
                 {
                     "id": "camera",
-                    "kind": "trigger.camera.online",
-                    "config": {"camera_id": 3},
+                    "kind": "trigger.camera.connection",
+                    "config": {"camera_id": 3, "online": True},
                 },
                 {
                     "id": "safe-result",
@@ -842,8 +919,8 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
             automation = database.create_automation("Redaction", graph, enabled=True)
             engine = AutomationEngine(database, action)
             [run] = engine.emit(
-                "trigger.camera.online",
-                {"camera_id": 3, "password": "history-secret"},
+                "trigger.camera.connection",
+                {"camera_id": 3, "online": True, "password": "history-secret"},
                 wait=True,
             )
             saved = database.automation_run(run.id)
@@ -888,7 +965,7 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
                         "value": True,
                     },
                 },
-                {"id": "open", "kind": "action.primary_door.open", "config": {}},
+                {"id": "open", "kind": "action.ewelink.button", "config": {"device_id": "device", "channel": 1, "pulse_seconds": 1}},
                 {
                     "id": "recovered",
                     "kind": "action.log",
@@ -925,7 +1002,7 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
 
         def handler(kind, config, context):
             actions.append(kind)
-            if kind == "action.primary_door.open":
+            if kind == "action.ewelink.button":
                 raise RuntimeError("relay unavailable")
             return {"ok": True}
 
@@ -938,7 +1015,7 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
 
             self.assertEqual(run.status, "completed")
             self.assertEqual(
-                actions, ["action.primary_door.open", "action.log"]
+                actions, ["action.ewelink.button", "action.log"]
             )
             outcomes = {item["id"]: item["outcome"] for item in run.result["nodes"]}
             self.assertEqual(outcomes["condition"], "true")
@@ -1003,8 +1080,8 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
         graph = self.manual_graph()
         graph["nodes"] = [
             graph["nodes"][0],
-            {"id": "first", "kind": "action.primary_door.open", "config": {}},
-            {"id": "second", "kind": "action.primary_door.close", "config": {}},
+            {"id": "first", "kind": "action.ewelink.button", "config": {"device_id": "device", "channel": 1, "pulse_seconds": 1}},
+            {"id": "second", "kind": "action.ewelink.button", "config": {"device_id": "device", "channel": 2, "pulse_seconds": 1}},
         ]
         graph["edges"] = [
             {"id": "first", "from": "start", "to": "first", "outcome": "success"},
@@ -1060,8 +1137,8 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
         self.assertEqual(run.status, "completed")
         self.assertEqual(sorted(observed), ["first", "second"])
 
-    def test_default_door_graph_rechecks_presence_after_the_wait(self):
-        graph = validate_graph(default_door_graph(7))
+    def test_default_device_graph_rechecks_presence_after_the_wait(self):
+        graph = validate_graph(default_device_graph("device", 7))
         close_edges = [edge for edge in graph["edges"] if edge["to"] == "close-door"]
 
         self.assertEqual(close_edges[0]["outcome"], "true")
@@ -1070,7 +1147,7 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
         condition = next(node for node in graph["nodes"] if node["id"] == "still-away")
         self.assertEqual(condition["config"]["camera_id"], "*")
 
-    def test_default_door_runtime_opens_and_a_returned_target_prevents_close(self):
+    def test_default_device_runtime_activates_and_a_returned_target_prevents_second_action(self):
         actions = []
         state = {"authorized_count": 0}
 
@@ -1083,25 +1160,25 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "default-runtime.db")
-            database.create_automation("Default smart door", default_door_graph(0.04), True)
+            database.create_automation("Door access", default_device_graph("device", 0.04), True)
             engine = AutomationEngine(database, action, state_provider)
 
-            engine.emit("trigger.camera.authorized_appeared", {"camera_id": 1})
+            engine.emit("trigger.camera.authorized_presence", {"camera_id": 1, "present": True})
             self.assertTrue(engine.wait_for_idle(1))
-            self.assertEqual(actions, ["action.primary_door.open"])
+            self.assertEqual(actions, ["action.ewelink.button"])
 
-            engine.emit("trigger.camera.no_authorized_present", {"camera_id": 1})
+            engine.emit("trigger.camera.authorized_presence", {"camera_id": 1, "present": False})
             time.sleep(0.01)
             state["authorized_count"] = 1
             self.assertTrue(engine.wait_for_idle(1))
-            self.assertEqual(actions, ["action.primary_door.open"])
+            self.assertEqual(actions, ["action.ewelink.button"])
 
             state["authorized_count"] = 0
-            engine.emit("trigger.camera.no_authorized_present", {"camera_id": 2})
+            engine.emit("trigger.camera.authorized_presence", {"camera_id": 2, "present": False})
             self.assertTrue(engine.wait_for_idle(1))
             self.assertEqual(
                 actions,
-                ["action.primary_door.open", "action.primary_door.close"],
+                ["action.ewelink.button", "action.ewelink.button"],
             )
 
     def test_daily_schedule_handles_daylight_saving_gaps_and_repeated_times_once(self):

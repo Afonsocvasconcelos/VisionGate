@@ -1,16 +1,19 @@
 const $ = id => document.getElementById(id);
-let system = {cameras: [], profiles: [], door: {}, threshold: 0};
+let system = {cameras: [], profiles: [], threshold: 0};
 let config = {cameras: [], settings: {}};
-let selectedCameraId = Number(localStorage.getItem("cameraId")) || null;
-let loadedFeedId = null;
+let selectedCameraId = null;
 let enrolling = false;
 let enrollmentSession = null;
 let enrollmentReview = null;
 let enrollmentSelection = new Map();
 let enrollmentPoll = null;
-let ewelinkImportSession = null;
-let ewelinkImportedDevices = [];
 let ewelinkDevices = [];
+let dashboardAutomations = [];
+let dashboard = {selected: null, modules: [], available_modules: []};
+let dashboardResources = {cameras: [], ewelink: [], identities: []};
+let dashboardEditing = false;
+let dashboardDragId = null;
+let dashboardRunMessage = "";
 let toastTimer;
 let csrfToken = "";
 let brandName = "VisionGate";
@@ -53,32 +56,6 @@ async function api(url, options = {}) {
 async function loadSession() {
   const session = await api("/api/auth/session");
   csrfToken = session.csrf_token;
-}
-
-function selectedCamera() {
-  return system.cameras.find(camera => camera.id === selectedCameraId);
-}
-
-function syncCameraSelector() {
-  const ids = system.cameras.map(camera => camera.id);
-  if (!ids.includes(selectedCameraId)) selectedCameraId = ids[0] ?? null;
-  const select = $("cameraSelect");
-  select.replaceChildren();
-  for (const camera of system.cameras) {
-    const option = document.createElement("option");
-    option.value = camera.id;
-    option.textContent = camera.name;
-    select.append(option);
-  }
-  select.value = String(selectedCameraId ?? "");
-  select.disabled = !ids.length;
-  if (selectedCameraId !== loadedFeedId) {
-    loadedFeedId = selectedCameraId;
-    $("feed").src = selectedCameraId ? `/video/${selectedCameraId}?v=${Date.now()}` : "";
-    localStorage.setItem("cameraId", selectedCameraId ?? "");
-  }
-  $("editCamera").disabled = !selectedCameraId;
-  $("enroll").disabled = !selectedCameraId;
 }
 
 function renderProfiles(profiles) {
@@ -124,30 +101,19 @@ function renderProfiles(profiles) {
 }
 
 function renderSystem() {
-  syncCameraSelector();
-  const camera = selectedCamera();
-  const online = camera?.camera === "connected" && camera?.vision.startsWith("running");
-  const doorReady = Boolean(system.door.configured);
-  const doorBusy = Boolean(system.door.busy);
-  const state = doorBusy ? "changing" : doorReady ? system.door.state || "unknown" : "unconfigured";
-  $("doorStateBox").dataset.state = state;
-  $("doorState").textContent = {
-    open: "Open",
-    closed: "Closed",
-    changing: "Changing…",
-    unavailable: "Unavailable",
-    unconfigured: "Not configured",
-    unknown: "Unknown"
-  }[state] || "Unknown";
-  const check = $("doorCheck");
-  check.hidden = !doorReady;
-  const lastCommand = system.door.last_command ? ` · last command: ${system.door.last_command}` : "";
-  const stateDevice = system.door.state_source === "binary_sensor:door" ? "Door sensor" : "Relay";
-  check.textContent = system.door.state_check_error ? `${stateDevice} unavailable` : system.door.last_state_check ? `${stateDevice} checked${lastCommand}` : `Checking ${stateDevice.toLowerCase()}${lastCommand}`;
-  check.title = system.door.state_check_error || (system.door.last_state_check ? new Date(system.door.last_state_check * 1000).toLocaleString() : "");
-  for (const id of ["doorOpenCard", "doorCloseCard"]) $(id).disabled = !doorReady || doorBusy;
-  $("dot").className = `dot${online ? " ok" : camera?.vision === "failed" ? " bad" : ""}`;
-  $("connection").textContent = online ? camera.name : camera ? "Camera offline" : "No camera";
+  const cameraIds = dashboard.modules.filter(id => id.startsWith("camera:")).map(id => Number(id.slice(7)));
+  const cameras = system.cameras.filter(camera => cameraIds.includes(camera.id));
+  const online = cameras.filter(camera => camera.camera === "connected" && camera.vision.startsWith("running"));
+  const failed = cameras.some(camera => camera.vision === "failed");
+  $("dot").className = `dot${online.length ? " ok" : failed ? " bad" : ""}`;
+  $("connection").textContent = cameras.length
+    ? `${online.length}/${cameras.length} camera${cameras.length === 1 ? "" : "s"} online`
+    : dashboard.selected?.enabled ? `${dashboard.selected.name} ready` : dashboard.selected ? `${dashboard.selected.name} disabled` : "No automation";
+  for (const card of document.querySelectorAll("[data-camera-module]")) {
+    const camera = system.cameras.find(item => item.id === Number(card.dataset.cameraModule));
+    const state = card.querySelector(".module-state");
+    if (state) state.textContent = camera?.camera === "connected" ? "Online" : camera?.camera || "Unknown";
+  }
   renderProfiles(system.profiles);
 }
 
@@ -192,15 +158,6 @@ function fillSettings() {
   $("matchConfirmations").value = s.match_confirmations;
   $("embedEvery").value = s.embed_every;
   $("cooldown").value = s.open_cooldown_seconds;
-  $("ewelinkModel").value = s.ewelink_model ?? "SONOFF 4CH Pro R2";
-  $("ewelinkHost").value = s.ewelink_host ?? "";
-  $("ewelinkPort").value = s.ewelink_port ?? 8081;
-  $("ewelinkDeviceId").value = s.ewelink_device_id ?? "";
-  $("ewelinkDeviceKey").value = "";
-  $("ewelinkDeviceKey").placeholder = s.ewelink_device_key_configured ? "Saved · leave blank to keep" : "Required for LAN control";
-  $("ewelinkOpenChannel").value = s.ewelink_open_channel ?? 1;
-  $("ewelinkCloseChannel").value = s.ewelink_close_channel ?? 2;
-  $("pulseSeconds").value = s.pulse_seconds;
   renderCameraList();
 }
 
@@ -209,7 +166,311 @@ async function refresh() {
   try { system = await api("/api/status"); renderSystem(); }
   catch (_) { $("dot").className = "dot bad"; $("connection").textContent = "Server unavailable"; }
 }
-async function refreshAll() { await Promise.all([refresh(), loadConfig()]); }
+function dashboardResource(moduleId) {
+  if (moduleId === "manual") return {name: "Manual control"};
+  const [type, id] = moduleId.split(":");
+  return type === "camera"
+    ? dashboardResources.cameras.find(item => item.id === Number(id))
+    : dashboardResources.ewelink.find(item => item.id === id);
+}
+
+function dashboardModuleLabel(moduleId) {
+  const resource = dashboardResource(moduleId);
+  if (moduleId === "manual") return resource.name;
+  return resource?.name || (moduleId.startsWith("camera:") ? "Unavailable camera" : "Unavailable device");
+}
+
+function dashboardModuleNodes(moduleId) {
+  return (dashboard.selected?.graph?.nodes || []).filter(node => {
+    if (moduleId === "manual") return node.kind === "trigger.manual";
+    const [type, id] = moduleId.split(":");
+    if (type === "camera") return node.config?.camera_id === "*" || node.config?.camera_id === Number(id);
+    return node.config?.device_id === id;
+  });
+}
+
+function dashboardNodeLabel(node) {
+  const c = node.config || {};
+  const labels = {
+    "trigger.camera.authorized_presence": `Authorized ${c.present ? "present" : "absent"}`,
+    "trigger.camera.class_presence": `${c.label || "Object"} ${c.present ? "present" : "absent"}`,
+    "trigger.camera.connection": c.online ? "Camera online" : "Camera offline",
+    "trigger.ewelink.connection": c.online ? "Device online" : "Device offline",
+    "trigger.ewelink.property_changed": `${c.property || "Property"} changed`,
+    "action.camera.enable": "Enable camera",
+    "action.camera.disable": "Disable camera",
+    "action.ewelink.button": `Pulse channel ${c.channel || 1}`,
+    "action.ewelink.switch": `Channel ${c.channel || 1} ${c.state || ""}`,
+    "action.ewelink.refresh": "Refresh state",
+    "action.ewelink.light": "Control light",
+    "action.ewelink.cover": "Control cover",
+    "action.ewelink.number": `Set ${c.property || "value"}`,
+    "action.ewelink.enum": `Set ${c.property || "option"}`,
+  };
+  return labels[node.kind] || node.kind.split(".").at(-1).replaceAll("_", " ");
+}
+
+function moduleEditControls(card, moduleId, index) {
+  if (!dashboardEditing) return;
+  card.draggable = true;
+  card.ondragstart = event => {
+    dashboardDragId = moduleId;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", moduleId);
+  };
+  card.ondragover = event => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; };
+  card.ondrop = event => {
+    event.preventDefault();
+    const source = dashboardDragId || event.dataTransfer.getData("text/plain");
+    if (!source || source === moduleId) return;
+    const next = dashboard.modules.filter(id => id !== source);
+    next.splice(next.indexOf(moduleId), 0, source);
+    updateDashboardModules(next);
+  };
+  const controls = document.createElement("div");
+  controls.className = "module-edit-controls";
+  const up = document.createElement("button");
+  const down = document.createElement("button");
+  const remove = document.createElement("button");
+  for (const button of [up, down, remove]) { button.type = "button"; button.className = "mini-button"; }
+  up.textContent = "←"; up.title = "Move earlier"; up.disabled = index === 0;
+  down.textContent = "→"; down.title = "Move later"; down.disabled = index === dashboard.modules.length - 1;
+  remove.textContent = "×"; remove.title = `Remove ${dashboardModuleLabel(moduleId)} from dashboard`;
+  up.onclick = () => {
+    const next = [...dashboard.modules];
+    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+    updateDashboardModules(next);
+  };
+  down.onclick = () => {
+    const next = [...dashboard.modules];
+    [next[index + 1], next[index]] = [next[index], next[index + 1]];
+    updateDashboardModules(next);
+  };
+  remove.onclick = () => updateDashboardModules(dashboard.modules.filter(id => id !== moduleId));
+  controls.append(up, down, remove);
+  card.querySelector(".module-head").append(controls);
+}
+
+function appendModuleUses(card, moduleId) {
+  const uses = [...new Set(dashboardModuleNodes(moduleId).map(dashboardNodeLabel))];
+  if (!uses.length) return;
+  const list = document.createElement("div");
+  list.className = "module-uses";
+  for (const use of uses) {
+    const item = document.createElement("span");
+    item.textContent = use;
+    list.append(item);
+  }
+  card.append(list);
+}
+
+function moduleHead(title, stateText) {
+  const head = document.createElement("header");
+  head.className = "module-head";
+  const name = document.createElement("h2");
+  name.textContent = title;
+  const state = document.createElement("span");
+  state.className = "module-state";
+  state.textContent = stateText;
+  head.append(name, state);
+  return head;
+}
+
+function manualDashboardModule() {
+  const card = document.createElement("article");
+  card.className = "panel dashboard-module manual-module";
+  card.append(moduleHead("Manual control", dashboard.selected.enabled ? "Ready" : "Manual only"));
+  const actions = document.createElement("div");
+  actions.className = "manual-actions";
+  const test = document.createElement("button");
+  const run = document.createElement("button");
+  test.type = run.type = "button";
+  test.className = "btn";
+  run.className = "btn primary";
+  test.textContent = "Test safely";
+  run.textContent = "Run now";
+  test.onclick = () => runDashboardAutomation(true);
+  run.onclick = () => runDashboardAutomation(false);
+  actions.append(test, run);
+  const status = document.createElement("p");
+  status.className = "manual-status";
+  status.setAttribute("role", "status");
+  status.textContent = dashboardRunMessage;
+  card.append(actions, status);
+  return card;
+}
+
+function cameraDashboardModule(moduleId) {
+  const cameraId = Number(moduleId.slice(7));
+  const resource = dashboardResource(moduleId);
+  const state = system.cameras.find(item => item.id === cameraId)?.camera || "Unknown";
+  const card = document.createElement("article");
+  card.className = "panel dashboard-module camera-module";
+  card.dataset.cameraModule = cameraId;
+  card.append(moduleHead(resource?.name || "Camera", state === "connected" ? "Online" : state));
+  appendModuleUses(card, moduleId);
+  const video = document.createElement("div");
+  video.className = "video-wrap";
+  const feed = document.createElement("img");
+  feed.src = `/video/${cameraId}?v=${Date.now()}`;
+  feed.alt = `${resource?.name || "Camera"} live video with tracked objects`;
+  const note = document.createElement("div");
+  note.className = "enroll-note";
+  note.textContent = "Recording visual samples";
+  video.append(feed, note);
+  const footer = document.createElement("footer");
+  footer.className = "module-footer";
+  const edit = document.createElement("button");
+  const remove = document.createElement("button");
+  const enroll = document.createElement("button");
+  for (const button of [edit, remove, enroll]) { button.type = "button"; button.className = "btn small"; }
+  edit.textContent = "Edit";
+  remove.textContent = "Delete";
+  remove.classList.add("danger");
+  remove.dataset.cameraDelete = String(cameraId);
+  enroll.textContent = "Record samples";
+  enroll.classList.add("primary");
+  enroll.dataset.enrollCamera = String(cameraId);
+  edit.onclick = () => openCameraDialog(config.cameras.find(item => item.id === cameraId));
+  remove.onclick = () => removeCameraById(cameraId);
+  enroll.onclick = () => startOrStopEnrollment(cameraId);
+  footer.append(edit, remove, enroll);
+  card.append(video, footer);
+  return card;
+}
+
+function deviceDashboardModule(moduleId) {
+  const device = dashboardResource(moduleId);
+  const card = document.createElement("article");
+  card.className = "panel dashboard-module device-module";
+  card.append(moduleHead(device?.name || "Device", device?.online === true ? "Online" : device?.online === false ? "Offline" : "Unknown"));
+  const body = document.createElement("div");
+  body.className = "module-body";
+  const model = document.createElement("p");
+  model.textContent = device?.model || "Device unavailable";
+  body.append(model);
+  const channels = [...new Set(dashboardModuleNodes(moduleId).map(node => node.config?.channel).filter(Number.isInteger))];
+  const switches = device?.state?.switches || [];
+  for (const channel of channels) {
+    const value = switches.find(item => item.outlet === channel - 1)?.switch || "unknown";
+    const state = document.createElement("strong");
+    state.textContent = `Channel ${channel} · ${value}`;
+    body.append(state);
+  }
+  card.append(body);
+  appendModuleUses(card, moduleId);
+  return card;
+}
+
+function renderDashboardModules() {
+  const list = $("dashboardModules");
+  list.querySelectorAll(".video-wrap img").forEach(image => { image.src = ""; });
+  list.replaceChildren();
+  if (!dashboard.selected) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "Create an automation to build this dashboard.";
+    list.append(empty);
+    return;
+  }
+  if (!dashboard.modules.length) {
+    const empty = document.createElement("div");
+    empty.className = "panel empty dashboard-empty";
+    empty.textContent = dashboard.available_modules.length ? "Dashboard is empty. Choose Customize to add controls." : "This automation does not use dashboard devices.";
+    list.append(empty);
+  }
+  dashboard.modules.forEach((moduleId, index) => {
+    const card = moduleId === "manual" ? manualDashboardModule() : moduleId.startsWith("camera:") ? cameraDashboardModule(moduleId) : deviceDashboardModule(moduleId);
+    card.dataset.moduleId = moduleId;
+    moduleEditControls(card, moduleId, index);
+    list.append(card);
+  });
+  updateEnrollmentButtons();
+}
+
+function renderDashboardModulePicker() {
+  const select = $("dashboardModulePicker");
+  const missing = dashboard.available_modules.filter(module => !dashboard.modules.includes(module));
+  select.replaceChildren();
+  for (const module of missing) {
+    const option = document.createElement("option");
+    option.value = module;
+    option.textContent = dashboardModuleLabel(module);
+    select.append(option);
+  }
+  select.disabled = !missing.length;
+  $("addDashboardModule").disabled = !missing.length;
+}
+
+function renderDashboardAutomations() {
+  const select = $("dashboardAutomation");
+  select.replaceChildren();
+  for (const automation of dashboardAutomations) {
+    const option = document.createElement("option");
+    option.value = automation.id;
+    option.textContent = automation.name;
+    select.append(option);
+  }
+  const selected = dashboard.selected;
+  select.value = String(selected?.id || "");
+  select.disabled = !selected;
+  $("editDashboardAutomation").href = selected ? `/automations?id=${selected.id}` : "/automations";
+  $("editDashboardAutomation").textContent = selected ? "Open layout" : "Create automation";
+  $("customizeDashboard").disabled = !selected;
+  $("customizeDashboard").textContent = dashboardEditing ? "Done" : "Customize";
+  $("dashboardEditor").hidden = !dashboardEditing || !selected;
+  renderDashboardModulePicker();
+  renderDashboardModules();
+  renderSystem();
+}
+
+async function loadDashboardAutomations() {
+  const [data, resources] = await Promise.all([api("/api/dashboard/automation"), api("/api/devices")]);
+  dashboard = data;
+  dashboardResources = resources;
+  dashboardAutomations = data.automations;
+  renderDashboardAutomations();
+}
+
+async function updateDashboardModules(modules) {
+  const previous = [...dashboard.modules];
+  dashboard.modules = modules;
+  renderDashboardAutomations();
+  try {
+    await api("/api/dashboard/automation/modules", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({automation_id: dashboard.selected.id, modules})
+    });
+  } catch (error) {
+    dashboard.modules = previous;
+    renderDashboardAutomations();
+    toast(error.message);
+  }
+}
+
+async function runDashboardAutomation(dryRun) {
+  if (!dashboard.selected) return;
+  if (!dryRun && !confirm(`Run “${dashboard.selected.name}” now? This may control connected devices.`)) return;
+  document.querySelectorAll(".manual-actions button").forEach(button => { button.disabled = true; });
+  dashboardRunMessage = dryRun ? "Testing…" : "Running…";
+  const status = document.querySelector(".manual-status");
+  if (status) status.textContent = dashboardRunMessage;
+  try {
+    const result = await api(`/api/automations/${dashboard.selected.id}/${dryRun ? "dry-run" : "run"}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: dryRun ? undefined : JSON.stringify({confirm: true})
+    });
+    dashboardRunMessage = `${dryRun ? "Test" : "Run"} ${result.status}.`;
+    await loadDashboardAutomations();
+  } catch (error) {
+    dashboardRunMessage = error.message;
+    renderDashboardAutomations();
+  }
+}
+
+async function refreshAll() { await Promise.all([refresh(), loadConfig(), loadDashboardAutomations()]); }
 
 function openCameraDialog(camera = null) {
   $("cameraDialogTitle").textContent = camera ? "Edit camera" : "Add camera";
@@ -241,10 +502,7 @@ document.querySelectorAll(".tab").forEach(tab => {
   };
 });
 
-$("cameraSelect").onchange = () => { selectedCameraId = Number($("cameraSelect").value); loadedFeedId = null; renderSystem(); };
-$("addCamera").onclick = () => openCameraDialog();
 $("settingsAddCamera").onclick = () => openCameraDialog();
-$("editCamera").onclick = () => openCameraDialog(config.cameras.find(camera => camera.id === selectedCameraId));
 $("openSettings").onclick = async () => {
   try {
     await loadConfig();
@@ -265,8 +523,6 @@ $("cameraForm").onsubmit = async event => {
   const body = cameraPayload();
   try {
     const camera = await api(id ? `/api/cameras/${id}` : "/api/cameras", {method: id ? "PUT" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    selectedCameraId = camera.id;
-    loadedFeedId = null;
     $("cameraDialog").close();
     toast(`${camera.name} saved`);
     await refreshAll();
@@ -287,18 +543,34 @@ $("testCameraConnection").onclick = async () => {
   }
 };
 
-$("deleteCamera").onclick = async () => {
-  const id = Number($("cameraId").value);
+async function removeCameraById(id, closeDialog = false) {
   const camera = config.cameras.find(item => item.id === id);
   if (!camera || !confirm(`Delete ${camera.name}?`)) return;
   try {
     await api(`/api/cameras/${id}`, {method: "DELETE"});
-    $("cameraDialog").close();
-    selectedCameraId = null;
-    loadedFeedId = null;
+    if (closeDialog) $("cameraDialog").close();
     toast("Camera deleted");
     await refreshAll();
   } catch (error) { toast(error.message); }
+}
+
+$("deleteCamera").onclick = () => removeCameraById(Number($("cameraId").value), true);
+$("dashboardAutomation").onchange = async () => {
+  const selectedId = Number($("dashboardAutomation").value);
+  try {
+    dashboard = await api("/api/dashboard/automation", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({automation_id: selectedId})});
+    dashboardRunMessage = "";
+    dashboardEditing = false;
+    renderDashboardAutomations();
+  } catch (error) { toast(error.message); }
+};
+$("customizeDashboard").onclick = () => {
+  dashboardEditing = !dashboardEditing;
+  renderDashboardAutomations();
+};
+$("addDashboardModule").onclick = () => {
+  const module = $("dashboardModulePicker").value;
+  if (module) updateDashboardModules([...dashboard.modules, module]);
 };
 
 $("settingsForm").onsubmit = async event => {
@@ -315,15 +587,7 @@ $("settingsForm").onsubmit = async event => {
     match_margin: Number($("matchMargin").value),
     match_confirmations: Number($("matchConfirmations").value),
     embed_every: Number($("embedEvery").value),
-    open_cooldown_seconds: Number($("cooldown").value),
-    ewelink_model: $("ewelinkModel").value.trim(),
-    ewelink_host: $("ewelinkHost").value.trim(),
-    ewelink_port: Number($("ewelinkPort").value),
-    ewelink_device_id: $("ewelinkDeviceId").value.trim(),
-    ewelink_device_key: $("ewelinkDeviceKey").value.trim(),
-    ewelink_open_channel: Number($("ewelinkOpenChannel").value),
-    ewelink_close_channel: Number($("ewelinkCloseChannel").value),
-    pulse_seconds: Number($("pulseSeconds").value)
+    open_cooldown_seconds: Number($("cooldown").value)
   };
   try {
     await api("/api/settings", {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -397,7 +661,7 @@ function addChannelControls(container, device, capability) {
     actions.append(
       deviceActionButton("On", () => runEwelinkDeviceAction(device, "switch", {channel, state: "on"}, `turn channel ${channel} on`)),
       deviceActionButton("Off", () => runEwelinkDeviceAction(device, "switch", {channel, state: "off"}, `turn channel ${channel} off`)),
-      deviceActionButton("Pulse", () => runEwelinkDeviceAction(device, "button", {channel, pulse_seconds: Number($("pulseSeconds").value) || 1}, `pulse channel ${channel}`))
+      deviceActionButton("Pulse", () => runEwelinkDeviceAction(device, "button", {channel, pulse_seconds: 1}, `pulse channel ${channel}`))
     );
     row.append(label, actions);
     container.append(row);
@@ -451,7 +715,7 @@ function addCapabilityControls(container, device, capability) {
     actions.append(
       deviceActionButton("On", () => runEwelinkDeviceAction(device, "switch", {state: "on"}, "turn on")),
       deviceActionButton("Off", () => runEwelinkDeviceAction(device, "switch", {state: "off"}, "turn off")),
-      deviceActionButton("Pulse", () => runEwelinkDeviceAction(device, "button", {pulse_seconds: Number($("pulseSeconds").value) || 1}, "pulse"))
+      deviceActionButton("Pulse", () => runEwelinkDeviceAction(device, "button", {pulse_seconds: 1}, "pulse"))
     );
   } else if (capability.type === "light") {
     if (capability.switch_key) {
@@ -494,27 +758,6 @@ function addCapabilityControls(container, device, capability) {
   container.append(row);
 }
 
-async function useAsPrimaryDoor(device) {
-  const channels = device.capabilities.find(capability => capability.type === "channels")?.channels || [];
-  if (channels.length < 2) return toast("Primary Door requires separate open and close channels.");
-  let openChannel = Number($("ewelinkOpenChannel").value);
-  let closeChannel = Number($("ewelinkCloseChannel").value);
-  if (!channels.includes(openChannel)) openChannel = channels[0];
-  if (!channels.includes(closeChannel) || closeChannel === openChannel) closeChannel = channels.find(channel => channel !== openChannel);
-  if (!confirm(`Use ${device.name} as the Primary Door on channels ${openChannel}/${closeChannel}?`)) return;
-  try {
-    const result = await api(`/api/ewelink/devices/${encodeURIComponent(device.id)}/primary-door`, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({host: device.host || "", port: device.port || 8081, open_channel: openChannel, close_channel: closeChannel, pulse_seconds: Number($("pulseSeconds").value) || 1})
-    });
-    config.settings = {...config.settings, ...result.settings};
-    fillSettings();
-    renderEwelinkDevices();
-    toast(`${device.name} is now the Primary Door`);
-  } catch (error) { toast(error.message); }
-}
-
 function renderEwelinkDevices() {
   const list = $("ewelinkDeviceList");
   const query = $("ewelinkDeviceSearch").value.trim().toLowerCase();
@@ -538,9 +781,7 @@ function renderEwelinkDevices() {
     const paths = [device.connections?.lan ? "LAN" : "", device.connections?.cloud ? "cloud" : ""].filter(Boolean).join(" + ") || "no control path";
     const model = document.createElement("small"); model.textContent = `${device.model || "Unknown model"} · ${device.online === true ? "online" : device.online === false ? "offline" : "state unknown"} · ${paths}`;
     identity.append(name, model);
-    const primary = deviceActionButton(config.settings.ewelink_device_id === device.id ? "Primary Door" : "Use as Primary Door", () => useAsPrimaryDoor(device));
-    primary.disabled = config.settings.ewelink_device_id === device.id;
-    head.append(identity, primary);
+    head.append(identity);
     const controls = document.createElement("div");
     controls.className = "capability-list";
     const capabilities = device.capabilities || [];
@@ -581,33 +822,19 @@ $("refreshEwelinkDevices").onclick = async () => {
   finally { $("refreshEwelinkDevices").disabled = false; }
 };
 
-function showImportedDevices(sessionId, devices) {
-  ewelinkImportSession = sessionId;
-  ewelinkImportedDevices = devices;
-  const select = $("ewelinkImportDevice");
-  select.replaceChildren();
-  for (const device of devices) {
-    const option = document.createElement("option");
-    option.value = device.id;
-    option.textContent = `${device.name} · ${device.model}${device.online ? " · online" : " · offline"}${device.host ? ` · ${device.host}` : ""}`;
-    select.append(option);
-  }
-  $("ewelinkImportResult").classList.add("show");
-  $("ewelinkImportStatus").textContent = `Found ${devices.length} compatible device${devices.length === 1 ? "" : "s"}. Select the door relay below.`;
-  syncImportedAddress();
+async function showImportedDevices(sessionId, devices, persisted = false) {
+  if (!devices.length) throw new Error("No compatible eWeLink devices were returned");
+  $("ewelinkImportStatus").textContent = "Saving account devices…";
+  if (!persisted) await api("/api/ewelink/import/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({session_id: sessionId, device_id: devices[0].id})});
+  await loadEwelinkDevices();
+  $("ewelinkImportStatus").textContent = `${devices.length} device${devices.length === 1 ? "" : "s"} saved.`;
+  toast("eWeLink devices saved");
 }
-
-function syncImportedAddress() {
-  const device = ewelinkImportedDevices.find(item => item.id === $("ewelinkImportDevice").value);
-  if (device?.host) { $("ewelinkHost").value = device.host; $("ewelinkPort").value = device.port || 8081; }
-}
-
-$("ewelinkImportDevice").onchange = syncImportedAddress;
 async function waitForEwelink(sessionId) {
   for (let attempt = 0; attempt < 300; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     const status = await api(`/api/ewelink/import/${encodeURIComponent(sessionId)}`);
-    if (status.status === "ready") { showImportedDevices(sessionId, status.devices); return; }
+    if (status.status === "ready") { await showImportedDevices(sessionId, status.devices); return; }
     if (status.status === "error") throw new Error(status.error);
   }
   throw new Error("eWeLink authorization timed out; start it again");
@@ -638,24 +865,19 @@ $("ewelinkPasswordLogin").onclick = async () => {
     if (!body.account || !body.password) throw new Error("Enter the eWeLink account and password");
     $("ewelinkImportStatus").textContent = "Signing in and finding compatible devices…";
     const result = await api("/api/ewelink/import/password", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    showImportedDevices(result.session_id, result.devices);
+    await showImportedDevices(result.session_id, result.devices, result.persisted);
   } catch (error) { $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
   finally { $("ewelinkAccountPassword").value = ""; }
 };
-$("ewelinkApplyImport").onclick = async () => {
-  const device = ewelinkImportedDevices.find(item => item.id === $("ewelinkImportDevice").value);
-  const host = $("ewelinkHost").value.trim();
-  if (!device) return toast("Select an eWeLink device");
-  const body = {session_id: ewelinkImportSession, device_id: device.id, host, port: Number($("ewelinkPort").value) || 8081, open_channel: Number($("ewelinkOpenChannel").value), close_channel: Number($("ewelinkCloseChannel").value), pulse_seconds: Number($("pulseSeconds").value)};
-  try {
-    const result = await api("/api/ewelink/import/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    await refreshAll();
-    await loadEwelinkDevices();
-    $("ewelinkImportResult").classList.remove("show");
-    $("ewelinkImportStatus").textContent = `${result.name} imported. ${brandName} now uses ${result.mode === "lan" ? "LAN with cloud fallback" : "cloud control"} on channels ${body.open_channel}/${body.close_channel}.`;
-    toast("eWeLink door configured");
-  } catch (error) { $("ewelinkImportStatus").textContent = error.message; toast(error.message); }
-};
+
+function updateEnrollmentButtons() {
+  document.querySelectorAll("[data-enroll-camera]").forEach(button => {
+    const active = Number(button.dataset.enrollCamera) === selectedCameraId;
+    button.textContent = enrolling && active ? "Stop and review" : "Record samples";
+    button.disabled = Boolean(enrollmentSession) && !active;
+    button.closest(".camera-module")?.classList.toggle("enrolling", enrolling && active);
+  });
+}
 
 function resetEnrollment() {
   clearInterval(enrollmentPoll);
@@ -664,9 +886,7 @@ function resetEnrollment() {
   enrollmentReview = null;
   enrollmentSelection.clear();
   enrolling = false;
-  $("videoWrap").classList.remove("enrolling");
-  $("enroll").textContent = "Record samples";
-  $("enroll").disabled = !selectedCameraId;
+  updateEnrollmentButtons();
 }
 
 function syncEnrollmentTargets() {
@@ -762,8 +982,7 @@ function openEnrollmentReview(review) {
   enrollmentPoll = null;
   enrollmentReview = review;
   enrolling = false;
-  $("videoWrap").classList.remove("enrolling");
-  $("enroll").textContent = "Record samples";
+  updateEnrollmentButtons();
   $("enrollmentTimeline").max = Math.max(0, review.frames.length - 1);
   $("enrollmentTimeline").value = 0;
   $("enrollmentName").value = "";
@@ -785,9 +1004,10 @@ async function pollEnrollment() {
   }
 }
 
-async function startOrStopEnrollment() {
-  if (!selectedCameraId) return;
-  $("enroll").disabled = true;
+async function startOrStopEnrollment(cameraId) {
+  if (!cameraId) return;
+  selectedCameraId = cameraId;
+  document.querySelectorAll("[data-enroll-camera]").forEach(button => { button.disabled = true; });
   try {
     if (enrollmentSession) {
       const review = await api(`/api/enrollments/${enrollmentSession.id}/stop`, {method: "POST"});
@@ -796,14 +1016,13 @@ async function startOrStopEnrollment() {
     }
     enrollmentSession = await api(`/api/cameras/${selectedCameraId}/enrollment/start`, {method: "POST"});
     enrolling = true;
-    $("videoWrap").classList.add("enrolling");
-    $("enroll").textContent = "Stop and review";
+    updateEnrollmentButtons();
     enrollmentPoll = setInterval(pollEnrollment, 1000);
   } catch (error) {
     resetEnrollment();
     toast(error.message);
   } finally {
-    $("enroll").disabled = !selectedCameraId;
+    updateEnrollmentButtons();
   }
 }
 
@@ -862,7 +1081,6 @@ async function openProfileSamples(profile) {
   } catch (error) { toast(error.message); }
 }
 
-$("enroll").onclick = startOrStopEnrollment;
 $("enrollmentTimeline").oninput = renderEnrollmentFrame;
 $("enrollmentTarget").onchange = () => { $("enrollmentNameLabel").hidden = $("enrollmentTarget").value !== "new"; };
 $("cancelEnrollment").onclick = cancelEnrollment;
@@ -891,21 +1109,9 @@ $("enrollmentForm").onsubmit = async event => {
   }
 };
 
-async function testDoor(action) {
-  if (!confirm(`${action === "open" ? "Open" : "Close"} the door?`)) return;
-  try {
-    await api("/api/door/test", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true, action})});
-    await refreshAll();
-    toast(`Door ${action} command completed`);
-  } catch (error) { await refreshAll(); toast(error.message); }
-}
-$("doorOpenCard").onclick = () => testDoor("open");
-$("doorCloseCard").onclick = () => testDoor("close");
-
 async function start() {
   await Promise.all([loadSession(), loadBrand()]);
   await refreshAll();
-  api("/api/door/refresh", {method: "POST"}).then(door => { system.door = door; renderSystem(); }).catch(() => {});
   setInterval(refresh, 2000);
 }
 start().catch(error => toast(error.message));

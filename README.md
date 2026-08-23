@@ -4,7 +4,7 @@ VisionGate is a Windows-first FastAPI application that reads multiple RTSP camer
 
 Maintainers should start with [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) for the complete product contract, architecture, user decisions, persistence model, workflows, and constraints.
 
-Each enabled camera has its own independent detector and tracker. Cameras share authorized identities and the Primary Door. The editable **Default smart door** automation opens for a confirmed authorized match, waits only after authorized targets disappear, checks every camera again, and then closes. Manual opens do not start that flow. Enrollment recordings are temporary and are deleted after save, cancel, expiry, or restart.
+Each enabled camera has its own independent detector and tracker. Cameras share authorized identities and can control any imported device through editable automations. Each automation keeps its own canvas layout, and the dashboard remembers which layout is selected. Enrollment recordings are temporary and are deleted after save, cancel, expiry, or restart.
 
 SQLite stores cameras, settings, credentials, identity samples, imported eWeLink devices, automations, and recent run/event history in `data/whitelist.db`. A match must agree on object class, exceed the configured similarity threshold, remain clearly better than lookalike profiles, repeat across observations, and pass the opening cooldown.
 
@@ -37,15 +37,14 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 
 1. Pair the 4CH Pro R2 in the ordinary eWeLink app and install any offered firmware update.
 2. On the VisionGate PC, open `http://127.0.0.1:83`.
-3. Select **Settings > Door & eWeLink > Import device from eWeLink**.
+3. Select **Settings > Devices > Import device from eWeLink**.
 4. Enter the ordinary eWeLink account and password, then choose **Sign in and find devices**. The password is used once and is never saved.
-5. Choose the 4CH Pro R2, select **Use selected device**, then mark it as the **Primary Door**. Keep open channel `1`, close channel `2`, and a short pulse unless this installation differs.
-6. If discovery finds a LAN IP, reserve it in the router. Leaving the IP blank uses cloud control.
-7. Use **Open door** and **Close door** while the door can be observed safely.
+5. VisionGate saves every device returned by the account. A later sign-in refreshes that inventory and marks removed devices unavailable.
+6. Use the device card's **Pulse** control on channels `1` and `2` while the door can be observed safely.
+7. In **Automations**, drag a Trigger and Action to the canvas. Set the trigger to authorized presence `true`, then set the action to the 4CH Pro R2, channel `1`, and a short pulse.
+8. For closing, connect authorized presence `false` through a wait and an authorized-count condition to a channel `2` pulse. Physical obstruction protection and an independent timeout remain required.
 
-The **Default smart door** automation starts its close path after the last authorized person or vehicle disappears and checks all cameras again before closing. Open **Automations** and edit that path's wait step to change the delay; remove the close path to disable automatic closing.
-
-VisionGate refreshes eWeLink inventory and checks the door when it starts, when the dashboard opens, when a new device is saved, and once per minute. The 4CH Pro R2's momentary open/close relays cannot sense physical door position, so the dashboard honestly reports `unknown`, `changing`, or `unavailable` and shows the last command separately. If the selected device exposes a `door` binary sensor, VisionGate reports authoritative `open`/`closed`; otherwise a position sensor is required.
+VisionGate refreshes the persistent eWeLink inventory once per minute. The 4CH Pro R2's momentary relays cannot sense physical door position; add a contact sensor if physical open/closed state is required.
 
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
@@ -57,7 +56,9 @@ Double-click **Launch VisionGate.bat**. It checks the installation, requests a o
 
 The console prints the current `http://192.168.x.x:83` address for phones and other local devices.
 
-The responsive dashboard contains the live camera, door controls, authorized identities, and settings. The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Diagnostics and routine history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
+Choose an automation on the responsive dashboard to show only the cameras, eWeLink devices, and manual control used by that automation. Choose **Customize** to remove, restore, drag, or move those controls; the order is saved separately for every automation. A manual activator adds **Test safely** (no hardware changes) and a confirmed **Run now**. Disabling an automation pauses automatic triggers; explicit manual runs remain available.
+
+The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Authorized identities remain available beside the selected automation; diagnostics and routine history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
 
 Add a **Schedule activator** to run an automation at a local time every day or on selected weekdays, or repeat it every chosen number of minutes, hours, or days. Each schedule saves its time zone and shows the next run.
 
@@ -67,7 +68,7 @@ The equivalent manual command is:
 .\.venv\Scripts\python.exe -m uvicorn app:app --host 0.0.0.0 --port 83 --no-proxy-headers
 ```
 
-On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, door details, app name, logo, and color palette. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
+On first run, the existing `info.md` stream is imported. Afterwards, use **Add camera** or **Settings** to edit stream URLs, camera credentials, recognition parameters, devices, app name, logo, and color palette. Use **Test connection** in the camera editor to validate an RTSP address before saving it.
 
 The dashboard login cannot be changed from the website. Double-click **Configure Login.bat** on the VisionGate PC, choose a new username/password, then restart VisionGate. Only the username and a salted scrypt password hash are kept in `.env`; the password itself is never stored. Sessions are server-side, expire after 30 idle minutes or 8 total hours, and use HttpOnly/SameSite cookies, CSRF validation, login throttling, and restrictive browser security headers.
 
@@ -105,6 +106,7 @@ Older single-sample profiles migrate automatically and remain usable. Add varied
 .\.venv\Scripts\python.exe -m py_compile app.py auth.py automation.py core.py enrollment.py ewelink_cloud.py ewelink_devices.py
 node --check static\dashboard.js
 node --check static\automations.js
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\browser_ui_check.ps1
 ```
 
 `.env.example` contains login/session options and optional first-run defaults. Device settings belong in the app; login changes stay file-only through **Configure Login.bat**. Tracking follows the [Ultralytics tracking API](https://docs.ultralytics.com/modes/track/).

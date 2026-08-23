@@ -1,6 +1,6 @@
 # VisionGate: New Implementation Plan
 
-> **Status:** Implemented; final physical-device and clean-PC release checks remain  
+> **Status:** Implemented, then generalized by [CHANGES_TO_BE_MADE.md](CHANGES_TO_BE_MADE.md) on 2026-08-23. Any Primary Door references below describe the superseded first implementation and are retained only as design history.
 > **Purpose:** Turn VisionGate from one fixed smart-door workflow into a small, visual automation platform.  
 > **Scope of the first release:** Cameras, visual recognition, eWeLink devices, schedules, and manual controls.
 

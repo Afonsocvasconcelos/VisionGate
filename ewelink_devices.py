@@ -242,7 +242,7 @@ class EWeLinkDeviceManager:
     def _emit_changes(self, before, after) -> None:
         if before.online != after.online and after.online is not None:
             self.event_sink(
-                "trigger.ewelink.online" if after.online else "trigger.ewelink.offline",
+                "trigger.ewelink.connection",
                 {"device_id": after.device_id, "online": after.online},
             )
         before_state, _before_diagnostics = self._known_state(before)
@@ -266,15 +266,23 @@ class EWeLinkDeviceManager:
         with self._guard:
             lock = self._locks.setdefault(device_id, threading.Lock())
         with lock:
-            mode = self._send(device, specification)
             updates = specification["params"]
             if action == "button":
-                time.sleep(specification["pulse_seconds"])
-                off_arguments = dict(arguments)
-                off_arguments["state"] = "off"
+                off_arguments = {**arguments, "state": "off"}
                 off = typed_device_action(device.capabilities, "switch", off_arguments)
+                try:
+                    mode = self._send(device, specification)
+                except Exception:
+                    try:
+                        self._send(device, off)
+                    except Exception:
+                        log.exception("eWeLink button safety shutoff failed")
+                    raise
+                time.sleep(specification["pulse_seconds"])
                 self._send(device, off)
                 updates = off["params"]
+            else:
+                mode = self._send(device, specification)
             merged = self._merge_params(device.params, updates)
             updated = self.database.update_ewelink_device_state(
                 device_id, merged, device.online

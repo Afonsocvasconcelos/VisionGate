@@ -9,9 +9,9 @@
   <title>VisionGate</title>
 </head>
 <body>
-  <a class="skip-link" href="#liveCamera">Skip to live camera</a>
+  <a class="skip-link" href="#automationDashboard">Skip to dashboard</a>
   <header class="topbar">
-    <a class="brand" href="#liveCamera" aria-label="App home">
+    <a class="brand" href="#automationDashboard" aria-label="App home">
       <img data-brand-logo src="/logo.png" alt="">
       <strong data-brand-name>VisionGate</strong>
     </a>
@@ -23,46 +23,32 @@
     </div>
   </header>
 
-  <main class="dashboard">
-    <section id="liveCamera" class="panel camera-panel" aria-labelledby="cameraTitle" tabindex="-1">
-      <header class="panel-header">
-        <h1 id="cameraTitle">Live camera</h1>
-        <div class="camera-tools">
-          <select id="cameraSelect" aria-label="Active camera"></select>
-          <button id="editCamera" class="btn small" type="button">Edit</button>
-          <button id="addCamera" class="btn small" type="button">Add</button>
+  <main id="automationDashboard" class="dashboard" tabindex="-1">
+    <section class="panel dashboard-control" aria-labelledby="dashboardAutomationTitle">
+      <div class="dashboard-picker">
+        <label for="dashboardAutomation"><span id="dashboardAutomationTitle">Dashboard</span><select id="dashboardAutomation"></select></label>
+        <div class="dashboard-actions">
+          <button id="customizeDashboard" class="btn small" type="button">Customize</button>
+          <a id="editDashboardAutomation" class="btn primary small" href="/automations">Open layout</a>
         </div>
-      </header>
-      <div id="videoWrap" class="video-wrap">
-        <img id="feed" alt="Selected live camera with tracked objects">
-        <div class="enroll-note">Recording visual samples</div>
       </div>
-      <footer class="feed-footer">
-        <button id="enroll" class="btn primary" type="button">Record samples</button>
-      </footer>
+      <div id="dashboardEditor" class="dashboard-editor" hidden>
+        <label for="dashboardModulePicker">Add control<select id="dashboardModulePicker"></select></label>
+        <button id="addDashboardModule" class="btn small" type="button">Add</button>
+      </div>
     </section>
 
-    <aside class="side-column">
-      <section class="panel door-card" aria-labelledby="doorTitle">
-        <header class="door-head">
-          <h2 id="doorTitle">Door</h2>
-          <div id="doorStateBox" class="door-state" data-state="unknown"><span>State</span><strong id="doorState">Checking...</strong></div>
-        </header>
-        <p id="doorCheck" class="door-check" hidden></p>
-        <div class="door-controls">
-          <button id="doorOpenCard" class="door-button" type="button">Open</button>
-          <button id="doorCloseCard" class="door-button" type="button">Close</button>
-        </div>
-      </section>
+    <section id="dashboardModules" class="dashboard-modules" aria-live="polite">
+      <div class="empty">Choose an automation</div>
+    </section>
 
-      <section id="access" class="panel access-panel" aria-labelledby="accessTitle">
-        <header class="section-heading">
-          <h2 id="accessTitle">Authorized</h2>
-          <span id="profileCount" class="count">0</span>
-        </header>
-        <div id="profiles" class="list"><div class="empty">No authorized targets</div></div>
-      </section>
-    </aside>
+    <section id="access" class="panel access-panel" aria-labelledby="accessTitle">
+      <header class="section-heading">
+        <h2 id="accessTitle">Authorized</h2>
+        <span id="profileCount" class="count">0</span>
+      </header>
+      <div id="profiles" class="list"><div class="empty">No authorized targets</div></div>
+    </section>
   </main>
 
   <dialog id="enrollmentDialog" class="enrollment-review-dialog">
@@ -123,7 +109,7 @@
         <div class="tabs" role="tablist" aria-label="Settings sections">
           <button id="camerasTabButton" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="camerasTab" data-tab="camerasTab">Cameras</button>
           <button id="recognitionTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="recognitionTab" data-tab="recognitionTab">Recognition</button>
-          <button id="doorTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="doorTab" data-tab="doorTab">Door &amp; eWeLink</button>
+          <button id="devicesTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="devicesTab" data-tab="devicesTab">Devices</button>
           <button id="appearanceTabButton" class="tab" type="button" role="tab" aria-selected="false" aria-controls="appearanceTab" data-tab="appearanceTab">Appearance</button>
         </div>
 
@@ -150,12 +136,12 @@
               <label for="matchMargin">Lookalike margin<input id="matchMargin" type="number" min="0" max="0.25" step="0.01"><span class="field-help">Rejects identities that score too closely.</span></label>
               <label for="matchConfirmations">Required confirmations<input id="matchConfirmations" type="number" min="1" max="20" step="1"></label>
               <label for="embedEvery">Appearance update interval<input id="embedEvery" type="number" min="1" max="60" step="1"></label>
-              <label for="cooldown">Door cooldown seconds<input id="cooldown" type="number" min="0" max="3600" step="1"></label>
+              <label for="cooldown">Recognition cooldown seconds<input id="cooldown" type="number" min="0" max="3600" step="1"></label>
             </div>
           </div>
         </section>
 
-        <section id="doorTab" class="tab-panel" role="tabpanel" aria-labelledby="doorTabButton">
+        <section id="devicesTab" class="tab-panel" role="tabpanel" aria-labelledby="devicesTabButton">
           <div class="settings-section">
             <div class="section-heading">
               <div><h3>Connected devices</h3><span id="ewelinkConnection" class="field-help">Checking eWeLink account</span></div>
@@ -163,22 +149,6 @@
             </div>
             <label class="device-search" for="ewelinkDeviceSearch">Search devices<input id="ewelinkDeviceSearch" type="search" placeholder="Name or model" autocomplete="off"></label>
             <div id="ewelinkDeviceList" class="device-list"><div class="empty">No imported devices</div></div>
-          </div>
-
-          <div class="settings-section">
-            <h3>Primary Door</h3>
-            <p class="notice">A reachable device IP enables fast LAN control; otherwise the imported cloud connection is used.</p>
-            <div class="form-grid">
-              <label class="wide" for="ewelinkModel">Device model<input id="ewelinkModel" required maxlength="80" placeholder="SONOFF 4CH Pro R2"></label>
-              <label for="ewelinkHost">Device IP (optional)<input id="ewelinkHost" maxlength="45" placeholder="Cloud control when blank"></label>
-              <label for="ewelinkPort">LAN port<input id="ewelinkPort" type="number" min="1" max="65535" step="1"></label>
-              <label for="ewelinkDeviceId">Device ID<input id="ewelinkDeviceId" maxlength="32" placeholder="1000xxxxxxxx"></label>
-              <label for="ewelinkDeviceKey">Device key<input id="ewelinkDeviceKey" type="password" maxlength="128" autocomplete="new-password"></label>
-              <label for="ewelinkOpenChannel">Open channel<select id="ewelinkOpenChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
-              <label for="ewelinkCloseChannel">Close channel<select id="ewelinkCloseChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
-              <label for="pulseSeconds">Relay pulse seconds<input id="pulseSeconds" type="number" min="0.1" max="30" step="0.1"></label>
-            </div>
-            <p class="notice">Automatic closing is controlled by the wait step in the <a href="/automations">Default smart door automation</a>.</p>
           </div>
 
           <section class="import-card" aria-labelledby="ewelinkImportTitle">
@@ -202,10 +172,6 @@
               <div class="import-actions"><button id="copyEwelinkCallback" class="btn small" type="button">Copy callback</button><button id="ewelinkQrLogin" class="btn" type="button">Sign in with QR code</button></div>
             </details>
             <p id="ewelinkImportStatus" class="import-status" role="status" aria-live="polite"></p>
-            <div id="ewelinkImportResult" class="import-result">
-              <div class="form-grid"><label class="wide" for="ewelinkImportDevice">Choose device<select id="ewelinkImportDevice"></select></label></div>
-              <div class="import-actions"><button id="ewelinkApplyImport" class="btn primary" type="button">Use selected device</button></div>
-            </div>
           </section>
         </section>
 

@@ -1,6 +1,6 @@
 # VisionGate repository context
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 This is the maintainer handoff for VisionGate. It records the requirements, architecture, data, safety rules, and Windows workflows. Never add real camera URLs, passwords, device keys, tokens, public hostnames, embeddings, or personal images to this file.
 
@@ -13,21 +13,21 @@ VisionGate is a Windows-first smart access and automation server. It:
 - Matches visual appearance against multiple reviewed samples per authorized identity.
 - Imports every visible eWeLink device and exposes only capability-validated controls.
 - Runs editable, persistent automation DAGs from camera, eWeLink, schedule, or manual triggers.
-- Keeps the daily dashboard limited to camera, door, identity, and essential status controls.
+- Keeps the daily dashboard limited to camera, selected automation, identities, and essential status controls.
 - Serves direct HTTP on port `83` for PC, LAN, and router-forwarded access.
 
-The target door hardware is a SONOFF 4CH Pro R2. Defaults are channel `1` to open and channel `2` to close, using a short momentary pulse.
+The known door hardware is a SONOFF 4CH Pro R2, but no device has a special role. An automation chooses the device, channel, and command for every action.
 
 ## Requirements that must stay true
 
 - Every camera detects, tracks, reconnects, and reports status independently.
-- Camera URLs, camera credentials, recognition settings, eWeLink devices/channels, Primary Door, timing, branding, and automations are editable in the app and persist.
+- Camera URLs, camera credentials, recognition settings, eWeLink devices/channels, timing, branding, automations, graph layouts, and each automation's selected dashboard modules/order persist.
 - Login credentials are file-only. The website must never offer password changes. Passwords may be any non-empty value within the configurator limit.
 - The UI must work at `320px`, with touch, keyboard, visible focus, and concise language.
 - Stats, routine polling, and detector diagnostics belong in the console or APIs, not the daily dashboard.
 - CPU-only and integrated-GPU computers are supported; an NVIDIA GPU is optional.
 - Direct HTTP port `83` is an explicit user requirement. Do not add HTTPS, Caddy, proxy headers, port `8000`, or other public ports unless the user changes it.
-- Never label a momentary relay's last command as physical door position. Without a position sensor, the honest states are `unknown`, `changing`, or `unavailable`.
+- Never infer physical door position from a momentary relay command. A separate position sensor is required.
 - Retain the door's physical obstruction protection and independent safety timeout.
 
 ## Runtime map
@@ -36,7 +36,7 @@ The target door hardware is a SONOFF 4CH Pro R2. Defaults are channel `1` to ope
 RTSP cameras ─> independent capture + YOLO/ByteTrack + ReID workers ─> event bus
 eWeLink REST/WebSocket ──────────────────────────────────────────────> event bus
 schedule clock + manual run ─────────────────────────────────────────> event bus
-event bus ─> validated automation DAGs ─> camera / Primary Door / eWeLink actions
+event bus ─> validated automation DAGs ─> camera / eWeLink device actions
                          │
                          └─> sanitized run history
 
@@ -49,7 +49,7 @@ The process is intentionally one Uvicorn worker. Sessions and the event bus are 
 
 | Path | Responsibility |
 |---|---|
-| `app.py` | FastAPI routes, middleware, camera workers, Primary Door control, orchestration |
+| `app.py` | FastAPI routes, middleware, camera workers, device orchestration |
 | `core.py` | SQLite schema/migration, cameras, identities/samples, matching, LAN protocol |
 | `automation.py` | Graph contract, validation, schedules, execution, waits, branches, run history |
 | `enrollment.py` | Temporary 4 FPS recording, review frames, sample commit, cleanup |
@@ -89,12 +89,14 @@ The dashboard uses record → review → select → save:
 
 Automations are versioned, acyclic JSON graphs shared by the runtime and both editors.
 
+The dashboard is derived from the selected graph. It offers modules only for cameras, eWeLink devices, and a manual trigger actually used by that automation. Users can remove, restore, drag, or move modules, and SQLite stores a separate order for every automation. Switching the selector replaces the module set. Manual modules provide a hardware-free dry run and a confirmed live run. Disabling an automation pauses its automatic triggers but does not block an explicit authenticated manual run.
+
 ### Triggers
 
-- Authorized identity appeared/disappeared; no authorized identity present.
-- Supported object class appeared/disappeared.
-- Camera online/offline.
-- eWeLink property or online state changed.
+- Authorized identity presence, configured as present or absent.
+- Supported object-class presence, configured as present or absent.
+- Camera connection, configured as online or offline.
+- eWeLink property changes or connection state, configured as online or offline.
 - Manual run.
 - **Schedule activator:** a chosen local time every day or selected weekdays, or every chosen number of minutes, hours, or days.
 
@@ -105,19 +107,19 @@ Schedule examples include every day at `03:00` and every `3` minutes. Schedules 
 - Conditions use fixed typed fields/operators; there is no script or raw expression input.
 - Rules can select a specific saved identity, individual eWeLink channels such as `channel_1`, device online state, or other known scalar device properties.
 - Edges can wait `0–86,400` seconds and set run-local scalar variables.
-- Actions control the Primary Door, supported eWeLink capabilities, camera enable state, or the application log.
+- Actions control an explicitly selected eWeLink device/channel/capability, camera enable state, or the application log.
 - Failure and false outcomes can use separate edges.
 - Dry runs never move hardware.
 - A confirmed live manual run is required before hardware actions execute.
 
 Each automation allows 1–16 concurrent runs, default 4. Excess runs are recorded as dropped. Commands to the same physical device are serialized. Active runs become canceled after restart; waits never resume stale hardware commands. The latest 1,000 run summaries are retained with sensitive values removed.
 
-### Default smart door
+### Example door access automation
 
 The editable default graph has two paths:
 
-1. An authorized target appears on any camera → open Primary Door.
-2. The last authorized target disappears → wait configured delay → count authorized targets across every camera → close only if the count is still zero.
+1. Authorized presence `true` on any camera → pulse the selected device's open channel.
+2. Authorized presence `false` → wait → count authorized targets across every camera → pulse the selected close channel only if the count is still zero.
 
 A manual open does not activate this close flow. An authorized target returning on either camera prevents the pending close.
 
@@ -132,7 +134,7 @@ A manual open does not activate this close flow. An authorized target returning 
 - Unknown properties are read-only diagnostics. Secret-shaped properties are neither returned nor emitted as events.
 - Every manual/test action is server-validated, explicitly confirmed, serialized per device, and immediately reports success or failure.
 
-Primary Door pulses its configured open or close channel and retries safety shutoff. On the 4CH Pro R2, idle relay state does not prove physical door position. The dashboard refreshes device inventory and door state when it opens, shows the last command separately, and uses a reported `door` binary sensor as the authoritative source when one is present.
+On the 4CH Pro R2, idle relay state does not prove physical door position. Manual device controls and automation actions validate the selected capability and channel before sending a command.
 
 ## Persistence and migration
 
@@ -144,7 +146,7 @@ SQLite remains the only database. `data/whitelist.db` contains:
 - `automations` and `automation_runs`
 - `events`
 
-Schema migration is additive and transactional. Before the automation/schema migration, SQLite creates and integrity-checks `data/whitelist.db.pre-automation.bak`. The same transaction creates tables/indexes, copies every legacy embedding into its first sample, imports the current door device, creates and validates the default automation, then commits. Any failure rolls back the additive tables and data changes.
+Schema migration is additive and transactional. Before the original automation/schema migration, SQLite creates and integrity-checks `data/whitelist.db.pre-automation.bak`. Current startup migration converts paired Boolean triggers, legacy device actions, typed conditions, edge endpoints, and old graph names while preserving layouts, waits, and enabled state.
 
 Runtime files intentionally excluded from Git:
 
@@ -199,11 +201,12 @@ Controls that must remain:
 .\.venv\Scripts\python.exe -m py_compile app.py auth.py automation.py core.py enrollment.py ewelink_cloud.py ewelink_devices.py
 node --check static\dashboard.js
 node --check static\automations.js
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\browser_ui_check.ps1
 ```
 
 GitHub Actions runs the Python dependency, test, compilation, and installer-plan gates on Windows with the official CPU PyTorch wheels. Some tests deliberately produce relay, HTTP, or timeout warnings while proving failure handling.
 
-Latest local release evidence on 2026-08-22: all `158` tests passed; dependency, launcher, compilation, and JavaScript checks passed; direct HTTP port `83` started successfully; real YOLO + MobileNet inference passed with CUDA disabled and on an NVIDIA GTX 1060; an authenticated Edge run at `320px` passed login, dashboard, and phone automation-editor overflow/touch-target checks; and an authenticated `1440x900` desktop run verified the node canvas, condition diamond, edge chips, full node visibility, and zero page overflow.
+Latest local release evidence on 2026-08-23: all `160` tests passed; dependency, launcher, compilation, and JavaScript checks passed; direct HTTP port `83` started successfully; real YOLO + MobileNet inference passed with CUDA disabled and on an NVIDIA GTX 1060; authenticated Edge runs verified automation switching, module removal/restoration/reordering persistence, a confirmed manual run, camera deletion, and zero overflow with `44px` controls at `320px`; the desktop and phone automation editors also passed their canvas/card checks.
 
 ## Known constraints
 

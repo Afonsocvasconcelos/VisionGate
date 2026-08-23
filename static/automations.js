@@ -3,20 +3,12 @@ const $ = id => document.getElementById(id);
 const NODE_TYPES = [
   ["Triggers", "trigger.manual", "Manual start"],
   ["Triggers", "trigger.schedule", "Schedule activator"],
-  ["Triggers", "trigger.camera.authorized_appeared", "Authorized target appeared"],
-  ["Triggers", "trigger.camera.authorized_disappeared", "Authorized target disappeared"],
-  ["Triggers", "trigger.camera.no_authorized_present", "No authorized target present"],
-  ["Triggers", "trigger.camera.class_appeared", "Object class appeared"],
-  ["Triggers", "trigger.camera.class_disappeared", "Object class disappeared"],
-  ["Triggers", "trigger.camera.online", "Camera online"],
-  ["Triggers", "trigger.camera.offline", "Camera offline"],
+  ["Triggers", "trigger.camera.authorized_presence", "Authorized target presence"],
+  ["Triggers", "trigger.camera.class_presence", "Object class presence"],
+  ["Triggers", "trigger.camera.connection", "Camera connection"],
   ["Triggers", "trigger.ewelink.property_changed", "Device property changed"],
-  ["Triggers", "trigger.ewelink.online", "Device online"],
-  ["Triggers", "trigger.ewelink.offline", "Device offline"],
+  ["Triggers", "trigger.ewelink.connection", "Device connection"],
   ["Conditions", "condition.compare", "Compare a value"],
-  ["Actions", "action.primary_door.open", "Open Primary Door"],
-  ["Actions", "action.primary_door.close", "Close Primary Door"],
-  ["Actions", "action.primary_door.query", "Check Primary Door"],
   ["Actions", "action.ewelink.switch", "Set device channel"],
   ["Actions", "action.ewelink.button", "Pulse device channel"],
   ["Actions", "action.ewelink.light", "Control light"],
@@ -27,8 +19,6 @@ const NODE_TYPES = [
   ["Actions", "action.camera.enable", "Enable camera"],
   ["Actions", "action.camera.disable", "Disable camera"],
   ["Actions", "action.log", "Write to log"],
-  ["Connection steps", "step.wait", "Wait"],
-  ["Connection steps", "step.set_variable", "Set run variable"],
 ];
 
 const TYPE_LABELS = Object.fromEntries(NODE_TYPES.map(([, kind, label]) => [kind, label]));
@@ -97,12 +87,15 @@ function defaultConfig(kind) {
   if (kind === "trigger.schedule") return {mode: "time", time: "03:00", weekdays: [0, 1, 2, 3, 4, 5, 6], timezone: localZone()};
   if (CAMERA_KINDS.has(kind)) {
     const config = {camera_id: firstCamera()};
-    if (kind.includes("class_")) config.label = "person";
+    if (kind === "trigger.camera.class_presence") Object.assign(config, {label: "person", present: true});
+    if (kind === "trigger.camera.authorized_presence") config.present = true;
+    if (kind === "trigger.camera.connection") config.online = true;
     return config;
   }
   if (DEVICE_KINDS.has(kind)) {
     const config = {device_id: firstDevice()};
     if (kind === "trigger.ewelink.property_changed") config.property = "channel_1";
+    if (kind === "trigger.ewelink.connection") config.online = true;
     if (kind === "action.ewelink.switch") Object.assign(config, {channel: 1, state: "on"});
     if (kind === "action.ewelink.button") Object.assign(config, {channel: 1, pulse_seconds: 1});
     if (kind === "action.ewelink.light") Object.assign(config, {mode: "brightness", brightness: 100});
@@ -111,7 +104,7 @@ function defaultConfig(kind) {
     if (kind === "action.ewelink.enum") Object.assign(config, {property: "mode", value: ""});
     return config;
   }
-  if (kind === "condition.compare") return {field: "event.authorized", operator: "equals", value: true};
+  if (kind === "condition.compare") return {field: "event.authorized", operator: "equals", value: true, value_type: "boolean"};
   if (kind === "action.log") return {message: "Automation ran"};
   return {};
 }
@@ -132,7 +125,7 @@ function starterGraph(name = "New automation") {
 }
 
 function finishStarter(document) {
-  document.edges.push({id: newId("edge"), from: document.nodes[0].id, to: document.nodes[1].id, outcome: "success", steps: []});
+  document.edges.push({id: newId("edge"), from: document.nodes[0].id, to: document.nodes[1].id, from_port: "right", to_port: "left", outcome: "success", steps: []});
   return document;
 }
 
@@ -166,7 +159,7 @@ function undo() {
 }
 
 function populatePalette() {
-  for (const id of ["nodeKind", "mobileNodeKind"]) {
+  for (const id of ["mobileNodeKind"]) {
     const select = $(id);
     select.replaceChildren();
     for (const groupName of [...new Set(NODE_TYPES.map(([group]) => group))]) {
@@ -219,47 +212,68 @@ function nodeSummary(node) {
   return "";
 }
 
-function beginConnect(nodeId) {
-  connectingFrom = nodeId;
+function endpointEdges(nodeId, port) {
+  return graph.edges.filter(edge => (edge.from === nodeId && edge.from_port === port) || (edge.to === nodeId && edge.to_port === port));
+}
+
+function beginConnect(nodeId, port) {
+  const occupied = endpointEdges(nodeId, port);
+  if (occupied.length) {
+    connectingFrom = null;
+    $("connectHint").hidden = true;
+    change(() => { graph.edges = graph.edges.filter(edge => !occupied.includes(edge)); });
+    return;
+  }
+  connectingFrom = {nodeId, port};
   $("connectHint").hidden = false;
   renderGraph();
 }
 
-function finishConnect(nodeId) {
-  if (!connectingFrom || connectingFrom === nodeId) return;
-  const exists = graph.edges.some(edge => edge.from === connectingFrom && edge.to === nodeId);
+function usePort(nodeId, port) {
+  const occupied = endpointEdges(nodeId, port);
+  if (occupied.length) return beginConnect(nodeId, port);
+  if (!connectingFrom) return beginConnect(nodeId, port);
+  if (connectingFrom.nodeId === nodeId) {
+    connectingFrom = null;
+    $("connectHint").hidden = true;
+    return renderGraph();
+  }
+  const exists = graph.edges.some(edge => edge.from === connectingFrom.nodeId && edge.to === nodeId);
   if (exists) {
     toast("These nodes are already connected.");
     return;
   }
-  const source = nodeById(connectingFrom);
-  const outcome = source?.kind === "condition.compare" ? "true" : "success";
-  change(() => graph.edges.push({id: newId("edge"), from: connectingFrom, to: nodeId, outcome, steps: []}));
+  const start = connectingFrom;
+  const source = nodeById(start.nodeId);
+  const outcome = source?.kind === "condition.compare"
+    ? (graph.edges.some(edge => edge.from === source.id && edge.outcome === "true") ? "false" : "true")
+    : "success";
   connectingFrom = null;
   $("connectHint").hidden = true;
+  change(() => graph.edges.push({id: newId("edge"), from: start.nodeId, to: nodeId, from_port: start.port, to_port: port, outcome, steps: []}));
+}
+
+function createPort(node, port) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `node-port port-${port}${endpointEdges(node.id, port).length ? " occupied" : ""}`;
+  button.setAttribute("aria-label", `${endpointEdges(node.id, port).length ? "Remove" : "Connect"} ${port} point of ${TYPE_LABELS[node.kind]}`);
+  button.onclick = event => { event.stopPropagation(); usePort(node.id, port); };
+  return button;
 }
 
 function createNodeElement(node) {
   const card = document.createElement("article");
   card.className = `graph-node ${nodeClass(node.kind)}`;
   if (selectedNodeId === node.id) card.classList.add("selected");
+  if (connectingFrom?.nodeId === node.id) card.classList.add("connecting");
   if (invalidNodes.has(node.id)) card.classList.add("invalid");
   card.dataset.nodeId = node.id;
   card.style.left = `${node.position.x}px`;
   card.style.top = `${node.position.y}px`;
   card.tabIndex = 0;
 
-  const input = document.createElement("button");
-  input.type = "button";
-  input.className = "node-port input-port";
-  input.setAttribute("aria-label", `Connect into ${TYPE_LABELS[node.kind]}`);
-  input.onclick = event => { event.stopPropagation(); finishConnect(node.id); };
-
-  const output = document.createElement("button");
-  output.type = "button";
-  output.className = "node-port output-port";
-  output.setAttribute("aria-label", `Connect from ${TYPE_LABELS[node.kind]}`);
-  output.onclick = event => { event.stopPropagation(); beginConnect(node.id); };
+  const ports = (node.kind === "condition.compare" ? ["top", "right", "bottom", "left"] : ["left", "right"]).map(port => createPort(node, port));
 
   const title = document.createElement("div");
   title.className = "node-title";
@@ -270,13 +284,16 @@ function createNodeElement(node) {
   title.append(type, name);
   const summary = document.createElement("p");
   summary.textContent = nodeSummary(node) || "No settings";
-  card.append(input, title, summary, output);
+  card.append(...ports, title, summary);
 
   card.onclick = () => selectNode(node.id);
   card.onkeydown = event => {
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectNode(node.id); }
   };
-  title.addEventListener("pointerdown", event => startNodeDrag(event, node));
+  card.addEventListener("pointerdown", event => {
+    if (event.target.closest("button, input, select, textarea, a")) return;
+    startNodeDrag(event, node);
+  });
   return card;
 }
 
@@ -325,11 +342,24 @@ function drawConnections() {
     const source = nodeById(edge.from);
     const target = nodeById(edge.to);
     if (!source || !target) continue;
-    const x1 = source.position.x + 220, y1 = source.position.y + 55;
-    const x2 = target.position.x, y2 = target.position.y + 55;
-    const bend = Math.max(70, Math.abs(x2 - x1) * .45);
+    const point = (node, port) => ({
+      top: [node.position.x + 110, node.position.y],
+      right: [node.position.x + 220, node.position.y + 55],
+      bottom: [node.position.x + 110, node.position.y + 110],
+      left: [node.position.x, node.position.y + 55],
+    }[port]);
+    const tangent = {top: [0, -1], right: [1, 0], bottom: [0, 1], left: [-1, 0]};
+    const [x1, y1] = point(source, edge.from_port || "right");
+    const [x2, y2] = point(target, edge.to_port || "left");
+    const bend = Math.max(65, Math.hypot(x2 - x1, y2 - y1) * .35);
+    const [sx, sy] = tangent[edge.from_port || "right"], [tx, ty] = tangent[edge.to_port || "left"];
+    const pathData = `M ${x1} ${y1} C ${x1 + sx * bend} ${y1 + sy * bend}, ${x2 + tx * bend} ${y2 + ty * bend}, ${x2} ${y2}`;
+    const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    hit.setAttribute("d", pathData);
+    hit.setAttribute("class", "graph-edge-hit");
+    hit.onclick = event => { event.stopPropagation(); selectEdge(edge.id); };
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
+    path.setAttribute("d", pathData);
     path.setAttribute("class", `graph-edge${selectedEdgeId === edge.id ? " selected" : ""}${invalidEdges.has(edge.id) ? " invalid" : ""}`);
     path.setAttribute("tabindex", "0");
     path.onclick = event => { event.stopPropagation(); selectEdge(edge.id); };
@@ -355,7 +385,7 @@ function drawConnections() {
     chip.onclick = event => { event.stopPropagation(); selectEdge(edge.id); };
     chip.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectEdge(edge.id); } };
     chip.append(background, label);
-    svg.append(path, chip);
+    svg.append(hit, path, chip);
   }
 }
 
@@ -397,25 +427,19 @@ function deleteEdge(id) {
   });
 }
 
-function addNode(kind, afterId = null) {
-  if (kind.startsWith("step.")) {
-    if (!selectedEdgeId) return toast("Select a connection before adding a step.");
-    const step = kind === "step.wait" ? {type: "wait", seconds: 10} : {type: "set_variable", name: "value", value: true};
-    change(() => edgeById(selectedEdgeId).steps.push(step));
-    return;
-  }
+function addNode(kind, afterId = null, position = null) {
   const source = afterId ? nodeById(afterId) : null;
   const count = graph.nodes.length;
   const node = {
     id: newId(kind.split(".").at(-1)),
     kind,
     config: defaultConfig(kind),
-    position: source ? {x: source.position.x + 300, y: source.position.y + 130} : {x: 90 + (count % 4) * 270, y: 90 + Math.floor(count / 4) * 150},
+    position: position || (source ? {x: source.position.x + 300, y: source.position.y + 130} : {x: 90 + (count % 4) * 270, y: 90 + Math.floor(count / 4) * 150}),
   };
   change(() => {
     graph.nodes.push(node);
     if (source) {
-      graph.edges.push({id: newId("edge"), from: source.id, to: node.id, outcome: source.kind === "condition.compare" ? "true" : "success", steps: []});
+      graph.edges.push({id: newId("edge"), from: source.id, to: node.id, from_port: "right", to_port: "left", outcome: source.kind === "condition.compare" ? "true" : "success", steps: []});
     }
     selectedNodeId = node.id;
     selectedEdgeId = null;
@@ -534,13 +558,14 @@ function conditionFields(node, body) {
   const config = node.config;
   const fields = [
     ["event.authorized", "Event target is authorized"], ["event.profile_id", "Event identity"], ["event.label", "Event object class"], ["event.camera_id", "Event camera ID"],
-    ["state.camera_online", "Camera is online"], ["state.authorized_count", "Authorized targets present"], ["state.door", "Primary Door state"],
+    ["state.camera_online", "Camera is online"], ["state.authorized_count", "Authorized targets present"],
     ["state.ewelink_property", "eWeLink property"], ["state.ewelink_online", "eWeLink device is online"], ["variable.value", "Run variable"],
   ];
   body.append(field(
     "Value to compare",
     select(config.field, fields, value => change(() => {
-      node.config = {field: value, operator: "equals", value: ["event.authorized", "state.camera_online"].includes(value) ? true : ["event.camera_id", "state.authorized_count"].includes(value) ? 0 : ""};
+      const initial = ["event.authorized", "state.camera_online", "state.ewelink_online"].includes(value) ? true : ["event.camera_id", "event.profile_id", "state.authorized_count"].includes(value) ? 0 : "";
+      node.config = {field: value, operator: "equals", value: initial, value_type: typeof initial === "boolean" ? "boolean" : typeof initial === "number" ? "number" : "string"};
       if (value === "event.profile_id") node.config.value = firstIdentity();
       if (["state.camera_online", "state.authorized_count"].includes(value)) node.config.camera_id = firstCamera();
       if (["state.ewelink_property", "state.ewelink_online"].includes(value)) node.config.device_id = firstDevice();
@@ -556,12 +581,20 @@ function conditionFields(node, body) {
   if (config.field === "state.ewelink_property") {
     body.append(deviceSelect(node), field("Property", select(config.property, propertyChoices(node), value => mutateConfig(node, "property", value))));
   }
-  const booleanValue = typeof config.value === "boolean";
-  const numberValue = typeof config.value === "number";
+  const valueType = config.value_type || (typeof config.value === "boolean" ? "boolean" : typeof config.value === "number" ? "number" : "string");
+  const booleanValue = valueType === "boolean";
+  const numberValue = valueType === "number";
   const operators = numberValue
     ? [["equals", "Equals"], ["not_equals", "Does not equal"], ["greater", "Greater than"], ["greater_or_equal", "At least"], ["less", "Less than"], ["less_or_equal", "At most"]]
     : [["equals", "Equals"], ["not_equals", "Does not equal"]];
   body.append(field("Operator", select(config.operator, operators, value => mutateConfig(node, "operator", value))));
+  const typeControl = select(valueType, [["boolean", "True / false"], ["string", "Text"], ["number", "Number"]], type => change(() => {
+    node.config.value_type = type;
+    node.config.value = type === "boolean" ? true : type === "number" ? 0 : "";
+    node.config.operator = "equals";
+  }));
+  typeControl.disabled = !config.field?.startsWith("variable.") && config.field !== "state.ewelink_property";
+  body.append(field("Value type", typeControl));
   if (config.field === "event.profile_id") {
     body.append(field("Identity", select(config.value, resources.identities.map(identity => [identity.id, `${identity.name} · ${identity.label}`]), value => mutateConfig(node, "value", Number(value))), true));
   } else if (booleanValue) {
@@ -596,12 +629,19 @@ function renderNodeInspector(node, inspector) {
   const body = document.createElement("div");
   body.className = "inspector-form";
   const config = node.config;
+  const group = nodeClass(node.kind) === "trigger" ? "Triggers" : nodeClass(node.kind) === "condition" ? "Conditions" : "Actions";
+  body.append(field("Behavior", select(node.kind, NODE_TYPES.filter(([name]) => name === group).map(([, kind, label]) => [kind, label]), kind => change(() => {
+    node.kind = kind;
+    node.config = defaultConfig(kind);
+  })), true));
 
   if (node.kind === "trigger.schedule") scheduleFields(node, body);
   else if (node.kind === "condition.compare") conditionFields(node, body);
   else {
     if (CAMERA_KINDS.has(node.kind)) body.append(cameraSelect(node, TRIGGERS.has(node.kind)));
-    if (node.kind.includes("class_")) body.append(field("Object class", select(config.label, ["person", "car", "motorcycle", "bicycle"].map(value => [value, value[0].toUpperCase() + value.slice(1)]), value => mutateConfig(node, "label", value))));
+    if (node.kind === "trigger.camera.class_presence") body.append(field("Object class", select(config.label, ["person", "car", "motorcycle", "bicycle"].map(value => [value, value[0].toUpperCase() + value.slice(1)]), value => mutateConfig(node, "label", value))));
+    if (["trigger.camera.authorized_presence", "trigger.camera.class_presence"].includes(node.kind)) body.append(field("When target is", select(String(config.present), [["true", "Present"], ["false", "Absent"]], value => mutateConfig(node, "present", value === "true"))));
+    if (["trigger.camera.connection", "trigger.ewelink.connection"].includes(node.kind)) body.append(field("When device is", select(String(config.online), [["true", "Online"], ["false", "Offline"]], value => mutateConfig(node, "online", value === "true"))));
     if (DEVICE_KINDS.has(node.kind)) body.append(deviceSelect(node));
     if (node.kind === "trigger.ewelink.property_changed") body.append(field("Property", select(config.property, propertyChoices(node), value => mutateConfig(node, "property", value)), true));
     if (["action.ewelink.switch", "action.ewelink.button"].includes(node.kind)) body.append(field("Channel", select(config.channel, channelChoices(node), value => mutateConfig(node, "channel", Number(value)))));
@@ -911,6 +951,24 @@ async function showHistory() {
 
 function setupCanvas() {
   const canvas = $("graphCanvas");
+  document.querySelectorAll(".node-template").forEach(template => {
+    template.ondragstart = event => {
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("text/plain", template.dataset.nodeKind);
+    };
+    template.onclick = () => addNode(template.dataset.nodeKind);
+  });
+  canvas.addEventListener("dragover", event => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; });
+  canvas.addEventListener("drop", event => {
+    event.preventDefault();
+    const kind = event.dataTransfer.getData("text/plain");
+    if (!NODE_TYPES.some(([, candidate]) => candidate === kind)) return;
+    const bounds = canvas.getBoundingClientRect();
+    addNode(kind, null, {
+      x: Math.max(0, Math.round((event.clientX - bounds.left - view.x) / view.scale - 110)),
+      y: Math.max(0, Math.round((event.clientY - bounds.top - view.y) / view.scale - 55)),
+    });
+  });
   canvas.addEventListener("pointerdown", event => {
     if (event.button !== 0 || ![canvas, $("graphWorld"), $("graphConnections"), $("graphNodes")].includes(event.target)) return;
     selectedNodeId = selectedEdgeId = null; renderGraph();
@@ -955,14 +1013,14 @@ async function initialize() {
     resources = deviceData;
     automations = saved;
     renderAutomationList();
-    if (automations.length) await loadAutomation(automations[0].id); else newAutomation();
+    const requested = Number(new URLSearchParams(location.search).get("id"));
+    if (automations.length) await loadAutomation(automations.some(item => item.id === requested) ? requested : automations[0].id); else newAutomation();
   } catch (error) { showValidation(error.message); }
 }
 
 populatePalette();
 setupCanvas();
 $("newAutomation").onclick = () => { if (!dirty || confirm("Discard your unsaved changes?")) newAutomation(); };
-$("addNode").onclick = () => addNode($("nodeKind").value);
 $("mobileAddNode").onclick = () => addNode($("mobileNodeKind").value);
 $("undoAutomation").onclick = undo;
 $("validateAutomation").onclick = validateCurrent;

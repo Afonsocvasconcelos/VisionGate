@@ -148,7 +148,7 @@ class AutomationRun:
 
 
 class Database:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -254,7 +254,7 @@ class Database:
             )
             if legacy_migration:
                 self._migrate_legacy_configuration(db)
-            self._upgrade_default_automation(db)
+            self._upgrade_automations(db)
             db.execute(
                 """INSERT INTO settings(key, value) VALUES ('schema_version', ?)
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
@@ -290,7 +290,7 @@ class Database:
 
     @staticmethod
     def _migrate_legacy_configuration(db: sqlite3.Connection) -> None:
-        from automation import default_door_graph, validate_graph
+        from automation import default_device_graph, validate_graph
 
         settings = {
             key: json.loads(value)
@@ -319,10 +319,11 @@ class Database:
                    (device_id, name, model, device_key, uiid, host, port, params,
                     capabilities, online, available, created_at, updated_at, last_seen,
                     last_sync)
-                   VALUES (?, 'Primary Door', ?, ?, NULL, ?, ?, '{}', ?, NULL, 1,
+                   VALUES (?, ?, ?, ?, NULL, ?, ?, '{}', ?, NULL, 1,
                            ?, ?, NULL, ?)""",
                 (
                     device_id,
+                    str(settings.get("ewelink_model") or "eWeLink device"),
                     str(settings.get("ewelink_model") or "SONOFF device"),
                     device_key,
                     str(settings.get("ewelink_host") or ""),
@@ -334,45 +335,47 @@ class Database:
                 ),
             )
 
-        if not db.execute("SELECT 1 FROM automations LIMIT 1").fetchone():
+        if device_id and not db.execute("SELECT 1 FROM automations LIMIT 1").fetchone():
             graph = validate_graph(
-                default_door_graph(float(settings.get("auto_close_seconds", 5)))
+                default_device_graph(
+                    device_id,
+                    float(settings.get("auto_close_seconds", 5)),
+                    int(settings.get("ewelink_open_channel", 1)),
+                    int(settings.get("ewelink_close_channel", 2)),
+                    float(settings.get("pulse_seconds", 1)),
+                )
             )
             db.execute(
                 """INSERT INTO automations
                    (name, enabled, revision, graph, next_run_at, created_at, updated_at)
-                   VALUES ('Default smart door', 1, 1, ?, NULL, ?, ?)""",
-                (json.dumps(graph, separators=(",", ":")), now, now),
+                   VALUES (?, 1, 1, ?, NULL, ?, ?)""",
+                (graph["name"], json.dumps(graph, separators=(",", ":")), now, now),
             )
 
     @staticmethod
-    def _upgrade_default_automation(db: sqlite3.Connection) -> None:
-        from automation import validate_graph
+    def _upgrade_automations(db: sqlite3.Connection) -> None:
+        from automation import upgrade_automation_graph, validate_graph
 
-        rows = db.execute(
-            "SELECT id, enabled, revision, graph FROM automations WHERE name = 'Default smart door'"
-        ).fetchall()
+        settings = {
+            key: json.loads(value)
+            for key, value in db.execute("SELECT key, value FROM settings")
+        }
+        rows = db.execute("SELECT id, enabled, revision, graph FROM automations").fetchall()
         for automation_id, enabled, revision, raw_graph in rows:
-            graph = json.loads(raw_graph)
-            condition = next(
-                (
-                    node
-                    for node in graph.get("nodes", [])
-                    if node.get("id") == "still-away"
-                    and node.get("kind") == "condition.compare"
-                    and node.get("config", {}).get("camera_id") == "event"
-                ),
-                None,
-            )
-            if not condition:
+            graph, changed = upgrade_automation_graph(json.loads(raw_graph), settings)
+            condition = next((node for node in graph.get("nodes", []) if node.get("id") == "still-away"), None)
+            if condition and condition.get("config", {}).get("camera_id") == "event":
+                condition["config"]["camera_id"] = "*"
+                changed = True
+            if not changed:
                 continue
-            condition["config"]["camera_id"] = "*"
             graph["revision"] = revision + 1
             graph["enabled"] = bool(enabled)
             graph = validate_graph(graph)
             db.execute(
-                "UPDATE automations SET revision = ?, graph = ?, updated_at = ? WHERE id = ?",
+                "UPDATE automations SET name = ?, revision = ?, graph = ?, updated_at = ? WHERE id = ?",
                 (
+                    graph["name"],
                     revision + 1,
                     json.dumps(graph, separators=(",", ":")),
                     datetime.now(timezone.utc).isoformat(),
