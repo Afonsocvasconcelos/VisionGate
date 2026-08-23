@@ -1,10 +1,12 @@
 # VisionGate
 
-VisionGate is a local FastAPI application that reads multiple RTSP cameras, tracks people, cars, motorcycles, and bicycles with YOLO11 + ByteTrack, compares spatial MobileNet appearance descriptors with a click-to-enroll whitelist, and controls one eWeLink door relay over LAN or cloud.
+VisionGate is a Windows-first FastAPI application that reads multiple RTSP cameras, tracks people, cars, motorcycles, and bicycles with YOLO11 + ByteTrack, compares multi-sample MobileNet appearance descriptors, and runs visual automations for eWeLink devices.
 
-Each enabled camera has its own independent detector and tracker. Cameras share the whitelist and door controller, so a match from either camera can open the same door. After an automatic open, either camera seeing an authorized target resets the configurable auto-close timer; when the last authorized target has been gone for that delay, VisionGate activates the close channel. Manual opens do not start this timer. Camera frames are not recorded.
+Maintainers should start with [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) for the complete product contract, architecture, user decisions, persistence model, workflows, and constraints.
 
-SQLite stores camera settings and credentials, recognition settings, whitelist embeddings, and the latest 1,000 activity events in `data/whitelist.db`. A match must agree on object class, exceed the configured similarity threshold, remain clearly better than lookalike profiles, repeat across observations, and pass the opening cooldown.
+Each enabled camera has its own independent detector and tracker. Cameras share authorized identities and the Primary Door. The editable **Default smart door** automation opens for a confirmed authorized match, waits only after authorized targets disappear, checks every camera again, and then closes. Manual opens do not start that flow. Enrollment recordings are temporary and are deleted after save, cancel, expiry, or restart.
+
+SQLite stores cameras, settings, credentials, identity samples, imported eWeLink devices, automations, and recent run/event history in `data/whitelist.db`. A match must agree on object class, exceed the configured similarity threshold, remain clearly better than lookalike profiles, repeat across observations, and pass the opening cooldown.
 
 ## Install
 
@@ -27,7 +29,7 @@ To check an existing installation without starting the server:
 
 ## Update
 
-Double-click **Update VisionGate.bat**. It upgrades compatible dependencies, repairs the selected CPU/CUDA runtime, and never removes `data`, `.env`, camera settings, events, or whitelist profiles. For a Git checkout, it installs Git through Windows Package Manager when needed and downloads application updates with a safe fast-forward pull; standalone copies still receive dependency updates.
+Double-click **Update VisionGate.bat**. It first saves `.env` and `data/` under `backups/pre-update-*`, then downloads a safe fast-forward update for Git checkouts and upgrades compatible dependencies. Login, cameras, identities, devices, automations, branding, and settings are preserved. Standalone ZIP copies receive dependency repair but need a fresh ZIP for application-code updates.
 
 ## Connect the SONOFF 4CH Pro R2
 
@@ -37,13 +39,13 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 2. On the VisionGate PC, open `http://127.0.0.1:83`.
 3. Select **Settings > Door & eWeLink > Import device from eWeLink**.
 4. Enter the ordinary eWeLink account and password, then choose **Sign in and find devices**. The password is used once and is never saved.
-5. Choose the 4CH Pro R2 and select **Use selected device**. Keep open channel `1`, close channel `2`, and a short pulse unless this installation differs.
+5. Choose the 4CH Pro R2, select **Use selected device**, then mark it as the **Primary Door**. Keep open channel `1`, close channel `2`, and a short pulse unless this installation differs.
 6. If discovery finds a LAN IP, reserve it in the router. Leaving the IP blank uses cloud control.
 7. Use **Open door** and **Close door** while the door can be observed safely.
 
-Set **Auto-close delay** in the same Door settings panel. The default is 5 seconds after the last authorized person or vehicle disappears; set it to `0` to disable automatic closing.
+The **Default smart door** automation starts its close path after the last authorized person or vehicle disappears and checks all cameras again before closing. Open **Automations** and edit that path's wait step to change the delay; remove the close path to disable automatic closing.
 
-The dashboard's **Last action** survives restarts. VisionGate checks the relay when it starts, when a new device is saved, and once per minute. The 4CH Pro R2's momentary open/close relays cannot sense physical door position; use a contact sensor if the app must detect movement made outside VisionGate.
+VisionGate refreshes eWeLink inventory and checks the door when it starts, when the dashboard opens, when a new device is saved, and once per minute. The 4CH Pro R2's momentary open/close relays cannot sense physical door position, so the dashboard honestly reports `unknown`, `changing`, or `unavailable` and shows the last command separately. If the selected device exposes a `door` binary sensor, VisionGate reports authoritative `open`/`closed`; otherwise a position sensor is required.
 
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
@@ -55,7 +57,9 @@ Double-click **Launch VisionGate.bat**. It checks the installation, requests a o
 
 The console prints the current `http://192.168.x.x:83` address for phones and other local devices.
 
-The responsive interface contains the live camera, door controls, authorized identities, and settings. Diagnostics and event history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
+The responsive dashboard contains the live camera, door controls, authorized identities, and settings. The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Diagnostics and routine history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
+
+Add a **Schedule activator** to run an automation at a local time every day or on selected weekdays, or repeat it every chosen number of minutes, hours, or days. Each schedule saves its time zone and shows the next run.
 
 The equivalent manual command is:
 
@@ -84,20 +88,23 @@ Rerun **Configure Online Access.bat** if the public address changes. Keep **Upda
 
 ## Enroll and calibrate
 
-1. Select a camera and wait for its camera and recognition states to become online.
-2. Select **Enroll identity**, then click inside a clear, fully visible tracked box and give it a unique name.
-3. Walk or drive past the camera and watch the model confidence shown on each detection box.
-4. Raise **Match threshold** if unknown targets match. Lower it carefully if genuine targets miss.
-5. Raise **Lookalike margin** when two similar whitelist entries are confused.
+1. Select a camera and wait for it to come online.
+2. Select **Record samples**, move through useful angles, then stop the recording.
+3. Review the timeline and select clear detected boxes.
+4. Add them to an existing identity or enter a new name, then save.
+5. Open an identity to review or remove individual samples. Its final sample cannot be removed.
+6. Raise **Match threshold** if unknown targets match; raise **Lookalike margin** if similar identities are confused.
 
-Older profiles remain usable as legacy descriptors. Remove and then re-enroll profiles marked as legacy to gain spatial appearance matching. Clothing and general appearance are not identity-grade biometrics, so use a second access factor wherever a false acceptance would create a serious safety or security risk.
+Older single-sample profiles migrate automatically and remain usable. Add varied samples when appearance or viewing angle changes. Clothing and general appearance are not identity-grade biometrics, so use another access factor wherever a false acceptance would create a serious safety or security risk.
 
 ## Checks
 
 ```powershell
 .\Launch VisionGate.bat --check
 .\.venv\Scripts\python.exe -m unittest discover -v
-.\.venv\Scripts\python.exe -m py_compile app.py auth.py core.py ewelink_cloud.py
+.\.venv\Scripts\python.exe -m py_compile app.py auth.py automation.py core.py enrollment.py ewelink_cloud.py ewelink_devices.py
+node --check static\dashboard.js
+node --check static\automations.js
 ```
 
 `.env.example` contains login/session options and optional first-run defaults. Device settings belong in the app; login changes stay file-only through **Configure Login.bat**. Tracking follows the [Ultralytics tracking API](https://docs.ultralytics.com/modes/track/).

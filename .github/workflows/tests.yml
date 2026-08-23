@@ -25,5 +25,5 @@ jobs:
         run: |
           python -m pip check
           python -m unittest discover -v
-          python -m py_compile app.py auth.py core.py ewelink_cloud.py
+          python -m py_compile app.py auth.py automation.py core.py enrollment.py ewelink_cloud.py ewelink_devices.py
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\Setup VisionGate.ps1" -Action Plan -Backend CPU

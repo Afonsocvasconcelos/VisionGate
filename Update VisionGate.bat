@@ -3,6 +3,9 @@ setlocal
 cd /d "%~dp0"
 title Update VisionGate
 
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup VisionGate.ps1" -Action Backup
+if errorlevel 1 goto :failed
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup VisionGate.ps1" -Action SourceUpdate
 if errorlevel 1 goto :failed
 
@@ -10,7 +13,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Setup Visi
 if errorlevel 1 goto :failed
 
 echo.
-echo VisionGate is up to date. Your cameras, whitelist, events, and settings were preserved.
+echo VisionGate is up to date. Your login, cameras, identities, automations, devices, and settings were preserved.
 pause
 exit /b 0
 

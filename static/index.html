@@ -17,6 +17,7 @@
     </a>
     <div class="top-actions">
       <span class="connection"><span id="dot" class="dot" aria-hidden="true"></span><span id="connection">Connecting</span></span>
+      <a class="btn small" href="/automations">Automations</a>
       <button id="openSettings" class="btn small" type="button">Settings</button>
       <button id="logout" class="btn small" type="button">Sign out</button>
     </div>
@@ -34,10 +35,10 @@
       </header>
       <div id="videoWrap" class="video-wrap">
         <img id="feed" alt="Selected live camera with tracked objects">
-        <div class="enroll-note">Tap the target to authorize</div>
+        <div class="enroll-note">Recording visual samples</div>
       </div>
       <footer class="feed-footer">
-        <button id="enroll" class="btn primary" type="button">Authorize a target</button>
+        <button id="enroll" class="btn primary" type="button">Record samples</button>
       </footer>
     </section>
 
@@ -45,10 +46,9 @@
       <section class="panel door-card" aria-labelledby="doorTitle">
         <header class="door-head">
           <h2 id="doorTitle">Door</h2>
-          <div id="doorStateBox" class="door-state" data-state="unknown"><span>Last action</span><strong id="doorState">Checking...</strong></div>
+          <div id="doorStateBox" class="door-state" data-state="unknown"><span>State</span><strong id="doorState">Checking...</strong></div>
         </header>
         <p id="doorCheck" class="door-check" hidden></p>
-        <p id="doorTiming" class="door-timing" hidden></p>
         <div class="door-controls">
           <button id="doorOpenCard" class="door-button" type="button">Open</button>
           <button id="doorCloseCard" class="door-button" type="button">Close</button>
@@ -65,15 +65,35 @@
     </aside>
   </main>
 
-  <dialog id="enrollmentDialog">
+  <dialog id="enrollmentDialog" class="enrollment-review-dialog">
     <form id="enrollmentForm">
-      <div class="dialog-head"><div><span class="panel-kicker">New whitelist entry</span><h2>Name this identity</h2></div><button class="close" type="button" data-close="enrollmentDialog" aria-label="Close">×</button></div>
+      <div class="dialog-head"><div><span class="panel-kicker">Visual access profile</span><h2>Choose useful samples</h2></div><button id="cancelEnrollmentTop" class="close" type="button" aria-label="Cancel enrollment">×</button></div>
       <div class="dialog-body">
-        <p class="notice">Use a unique name. For best accuracy, enroll the person or vehicle when it is clear, close, and fully visible.</p>
-        <input id="enrollmentX" type="hidden"><input id="enrollmentY" type="hidden">
-        <div class="form-grid"><label class="wide" for="enrollmentName">Identity name<input id="enrollmentName" required maxlength="60" placeholder="Example: Alice or blue hatchback" autocomplete="off"></label></div>
+        <div class="enrollment-stage">
+          <img id="enrollmentFrame" alt="Recorded camera frame with detected targets">
+          <div id="enrollmentBoxes" aria-label="Detected targets"></div>
+        </div>
+        <div class="timeline-row">
+          <input id="enrollmentTimeline" type="range" min="0" max="0" value="0" aria-label="Recorded frame">
+          <span id="enrollmentFrameCount">Frame 0 of 0</span>
+        </div>
+        <p class="field-help">Move through the recording and tap clear views of the same person or vehicle.</p>
+        <div id="selectedSamples" class="selected-samples"><div class="empty">No samples selected</div></div>
+        <div class="form-grid enrollment-target">
+          <label class="wide" for="enrollmentTarget">Add samples to<select id="enrollmentTarget"><option value="new">New identity</option></select></label>
+          <label id="enrollmentNameLabel" class="wide" for="enrollmentName">Identity name<input id="enrollmentName" maxlength="60" placeholder="Alice or blue hatchback" autocomplete="off"></label>
+        </div>
+        <p id="enrollmentReviewStatus" class="import-status" role="status" aria-live="polite"></p>
       </div>
-      <div class="dialog-actions"><button class="btn" type="button" data-close="enrollmentDialog">Cancel</button><button class="btn primary" type="submit">Add to access list</button></div>
+      <div class="dialog-actions"><button id="cancelEnrollment" class="btn" type="button">Cancel</button><button id="commitEnrollment" class="btn primary" type="submit">Save selected samples</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="samplesDialog">
+    <form method="dialog">
+      <div class="dialog-head"><div><span class="panel-kicker">Authorized identity</span><h2 id="samplesTitle">Visual samples</h2></div><button class="close" value="cancel" aria-label="Close">×</button></div>
+      <div id="profileSamples" class="dialog-body sample-grid"></div>
+      <div class="dialog-actions"><button class="btn" value="cancel">Close</button></div>
     </form>
   </dialog>
 
@@ -137,7 +157,16 @@
 
         <section id="doorTab" class="tab-panel" role="tabpanel" aria-labelledby="doorTabButton">
           <div class="settings-section">
-            <h3>Door relay</h3>
+            <div class="section-heading">
+              <div><h3>Connected devices</h3><span id="ewelinkConnection" class="field-help">Checking eWeLink account</span></div>
+              <button id="refreshEwelinkDevices" class="btn small" type="button">Refresh</button>
+            </div>
+            <label class="device-search" for="ewelinkDeviceSearch">Search devices<input id="ewelinkDeviceSearch" type="search" placeholder="Name or model" autocomplete="off"></label>
+            <div id="ewelinkDeviceList" class="device-list"><div class="empty">No imported devices</div></div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Primary Door</h3>
             <p class="notice">A reachable device IP enables fast LAN control; otherwise the imported cloud connection is used.</p>
             <div class="form-grid">
               <label class="wide" for="ewelinkModel">Device model<input id="ewelinkModel" required maxlength="80" placeholder="SONOFF 4CH Pro R2"></label>
@@ -148,8 +177,8 @@
               <label for="ewelinkOpenChannel">Open channel<select id="ewelinkOpenChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
               <label for="ewelinkCloseChannel">Close channel<select id="ewelinkCloseChannel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
               <label for="pulseSeconds">Relay pulse seconds<input id="pulseSeconds" type="number" min="0.1" max="30" step="0.1"></label>
-              <label for="autoCloseSeconds">Auto-close delay<input id="autoCloseSeconds" type="number" min="0" max="3600" step="1"><span class="field-help">Seconds after the last authorized target leaves. Use 0 to disable.</span></label>
             </div>
+            <p class="notice">Automatic closing is controlled by the wait step in the <a href="/automations">Default smart door automation</a>.</p>
           </div>
 
           <section class="import-card" aria-labelledby="ewelinkImportTitle">

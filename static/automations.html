@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#12202d">
+  <link rel="icon" href="/logo.png" type="image/png">
+  <link rel="stylesheet" href="/visiongate.css">
+  <title>Automations · VisionGate</title>
+</head>
+<body class="automation-page">
+  <a class="skip-link" href="#graphCanvas">Skip to automation</a>
+  <header class="topbar automation-topbar">
+    <a class="brand" href="/" aria-label="Back to dashboard">
+      <img data-brand-logo src="/logo.png" alt="">
+      <strong data-brand-name>VisionGate</strong>
+    </a>
+    <div class="automation-title">
+      <span>Automations</span>
+      <small id="saveState">Saved</small>
+    </div>
+    <div class="top-actions">
+      <a class="btn small" href="/">Dashboard</a>
+      <button id="logout" class="btn small" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main class="automation-layout">
+    <aside class="automation-sidebar" aria-label="Saved automations and node palette">
+      <section class="automation-pane">
+        <div class="section-heading compact">
+          <h1>Saved</h1>
+          <button id="newAutomation" class="btn small primary" type="button">New</button>
+        </div>
+        <div id="automationList" class="automation-list" aria-live="polite"></div>
+      </section>
+
+      <section class="automation-pane node-library">
+        <h2>Add a node</h2>
+        <label for="nodeKind">Type</label>
+        <select id="nodeKind" aria-label="Node type"></select>
+        <button id="addNode" class="btn" type="button">Add to canvas</button>
+        <p class="field-help">Connect nodes by selecting an output dot, then an input dot.</p>
+      </section>
+    </aside>
+
+    <section class="automation-workspace" aria-labelledby="automationNameLabel">
+      <header class="automation-toolbar">
+        <label id="automationNameLabel" class="automation-name">Name
+          <input id="automationName" maxlength="100" autocomplete="off">
+        </label>
+        <label class="automation-concurrency">Parallel runs
+          <input id="automationConcurrency" type="number" min="1" max="16" step="1">
+        </label>
+        <label class="toggle" for="automationEnabled">
+          <input id="automationEnabled" type="checkbox">
+          <span>Enabled</span>
+        </label>
+        <div class="toolbar-actions">
+          <button id="undoAutomation" class="btn small" type="button" title="Undo (Ctrl+Z)">Undo</button>
+          <button id="validateAutomation" class="btn small" type="button">Check</button>
+          <button id="saveAutomation" class="btn small primary" type="button">Save</button>
+        </div>
+      </header>
+
+      <div class="desktop-graph">
+        <div class="canvas-tools" aria-label="Canvas controls">
+          <button id="zoomOut" type="button" aria-label="Zoom out">−</button>
+          <button id="resetView" type="button">100%</button>
+          <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        </div>
+        <div id="graphCanvas" class="graph-canvas" tabindex="0" aria-label="Automation graph canvas">
+          <div id="graphWorld" class="graph-world">
+            <svg id="graphConnections" class="graph-connections" width="4000" height="3000" aria-label="Node connections"></svg>
+            <div id="graphNodes" class="graph-nodes"></div>
+          </div>
+          <div id="connectHint" class="connect-hint" hidden>Select the destination node</div>
+        </div>
+      </div>
+
+      <section id="mobileGraph" class="mobile-graph" aria-label="Phone automation editor">
+        <div class="mobile-add">
+          <select id="mobileNodeKind" aria-label="Node type to add"></select>
+          <button id="mobileAddNode" class="btn" type="button">Add</button>
+        </div>
+        <div id="mobileNodeList"></div>
+      </section>
+
+      <footer class="automation-runbar">
+        <div id="validationStatus" class="validation-status" role="status" aria-live="polite">Ready</div>
+        <div class="run-actions">
+          <button id="showRunHistory" class="btn small" type="button">History</button>
+          <button id="dryRunAutomation" class="btn small" type="button">Dry run</button>
+          <button id="runAutomation" class="btn small danger" type="button">Run now</button>
+        </div>
+      </footer>
+    </section>
+
+    <aside id="nodeInspector" class="node-inspector" aria-label="Selected node or connection settings">
+      <div class="inspector-empty">
+        <h2>Settings</h2>
+        <p>Select a node or connection.</p>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="historyDialog">
+    <form method="dialog">
+      <div class="dialog-head"><h2>Recent runs</h2><button class="close" value="cancel" aria-label="Close">×</button></div>
+      <div id="runHistory" class="dialog-body run-history"></div>
+      <div class="dialog-actions"><button class="btn" value="cancel">Close</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/automations.js" defer></script>
+</body>
+</html>

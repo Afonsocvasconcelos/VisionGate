@@ -21,17 +21,20 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from auth import AuthManager, TooManyAttempts
+from automation import AutomationEngine, GraphValidationError, default_door_graph, validate_graph
 from core import (
     AccessGate,
     Camera,
@@ -56,6 +59,8 @@ from ewelink_cloud import (
     cloud_status_request,
     cloud_switch_request,
 )
+from ewelink_devices import EWeLinkDeviceManager
+from enrollment import EnrollmentManager
 
 
 ROOT = Path(__file__).resolve().parent
@@ -96,6 +101,7 @@ DEFAULT_SETTINGS = {
     "ewelink_cloud_token": "",
     "ewelink_cloud_app_id": "",
     "ewelink_cloud_region": "",
+    "ewelink_cloud_user_apikey": "",
     "ewelink_open_channel": int(_number("EWELINK_OPEN_CHANNEL", 1, 1, 4)),
     "ewelink_close_channel": int(_number("EWELINK_CLOSE_CHANNEL", 2, 1, 4)),
     "pulse_seconds": _number("DOOR_PULSE_SECONDS", 1, 0.1, 30),
@@ -202,6 +208,8 @@ def _camera_connection_error() -> str:
     )
 
 
+EWELINK_CLOUD = EWeLinkCloud()
+EWELINK_IMPORTS = ImportSessions()
 DATABASE = Database(DATA_DIR / "whitelist.db")
 stored_settings = DATABASE.settings()
 missing_settings = {
@@ -231,17 +239,23 @@ class DoorController:
         self._guard = threading.Lock()
         self._config = config
         self._last_trigger = float("-inf")
-        self._last_authorized_seen = float("-inf")
-        self._auto_close_armed = False
-        self._auto_close_timer: threading.Timer | None = None
         self._poll_stop = threading.Event()
         self._poll_thread: threading.Thread | None = None
         self._last_state_check: float | None = None
         self._state_check_error = ""
         self.last_event = "Waiting for an approved target"
         self.last_error = ""
-        self._state = str(database.settings().get("door_last_state", ""))
-        if self._state not in {"open", "closed", "unknown"}:
+        settings = database.settings()
+        saved_command = str(
+            settings.get("door_last_command") or settings.get("door_last_state") or ""
+        )
+        self._last_command = {
+            "open": "open",
+            "closed": "close",
+            "close": "close",
+        }.get(saved_command)
+        self._state = "unknown"
+        if self._last_command is None:
             recent_command = next(
                 (
                     event.kind
@@ -250,12 +264,14 @@ class DoorController:
                 ),
                 "",
             )
-            self._state = {"door_open": "open", "door_close": "closed"}.get(
-                recent_command, "unknown"
-            )
-            if self._state != "unknown":
-                database.update_settings({"door_last_state": self._state})
+            self._last_command = {
+                "door_open": "open",
+                "door_close": "close",
+            }.get(recent_command)
+        if self._last_command:
+            database.update_settings({"door_last_command": self._last_command})
         self._validate(config)
+        self._state_source = "momentary_relay"
 
     @staticmethod
     def _configured(config: Config) -> bool:
@@ -314,15 +330,14 @@ class DoorController:
         with self._guard:
             old = self._config
             self._config = config
-            if self._auto_close_armed:
-                self._cancel_auto_close_locked()
-                if config.auto_close_seconds:
-                    self._auto_close_armed = True
-                    self._schedule_auto_close_locked()
             target_changed = self._target(old) != self._target(config)
             if target_changed:
                 self._state = "unknown"
-                self.database.update_settings({"door_last_state": "unknown"})
+                self._state_source = "momentary_relay"
+                self._last_command = None
+                self.database.update_settings(
+                    {"door_last_state": "unknown", "door_last_command": ""}
+                )
         if target_changed and self._configured(config):
             self.refresh_state()
 
@@ -339,60 +354,6 @@ class DoorController:
             config.ewelink_open_channel,
             config.ewelink_close_channel,
         )
-
-    def _cancel_auto_close_locked(self) -> None:
-        if self._auto_close_timer:
-            self._auto_close_timer.cancel()
-        self._auto_close_timer = None
-        self._auto_close_armed = False
-
-    def _schedule_auto_close_locked(self, delay: float | None = None) -> None:
-        config = self._config
-        if not self._auto_close_armed or not config.auto_close_seconds:
-            return
-        if delay is None:
-            delay = max(
-                0.01,
-                self._last_authorized_seen + config.auto_close_seconds - time.monotonic(),
-            )
-        timer = threading.Timer(delay, self._auto_close_check)
-        timer.daemon = True
-        self._auto_close_timer = timer
-        timer.start()
-
-    def _arm_auto_close(self) -> None:
-        with self._guard:
-            if not self._config.auto_close_seconds:
-                return
-            if self._last_authorized_seen == float("-inf"):
-                self._last_authorized_seen = time.monotonic()
-            self._cancel_auto_close_locked()
-            self._auto_close_armed = True
-            self._schedule_auto_close_locked()
-
-    def _auto_close_check(self) -> None:
-        with self._guard:
-            if not self._auto_close_armed:
-                return
-            remaining = (
-                self._last_authorized_seen
-                + self._config.auto_close_seconds
-                - time.monotonic()
-            )
-            if remaining > 0:
-                self._schedule_auto_close_locked(remaining)
-                return
-            self._auto_close_timer = None
-        if not self.trigger("last authorized target left", action="close"):
-            with self._guard:
-                if self._configured(self._config):
-                    self._schedule_auto_close_locked(0.25)
-                else:
-                    self._cancel_auto_close_locked()
-
-    def authorized_seen(self) -> None:
-        with self._guard:
-            self._last_authorized_seen = time.monotonic()
 
     def start(self) -> None:
         with self._guard:
@@ -416,7 +377,6 @@ class DoorController:
             thread.join(timeout=2)
         with self._guard:
             self._poll_thread = None
-            self._cancel_auto_close_locked()
 
     @property
     def configured(self) -> bool:
@@ -433,28 +393,23 @@ class DoorController:
             state = self._state
             last_state_check = self._last_state_check
             state_check_error = self._state_check_error
-            auto_close_armed = self._auto_close_armed
-            auto_close_remaining = (
-                max(
-                    0.0,
-                    self._last_authorized_seen
-                    + config.auto_close_seconds
-                    - time.monotonic(),
-                )
-                if auto_close_armed
-                else None
-            )
+            last_command = self._last_command
+            state_source = self._state_source
+        configured = self._configured(config)
+        if self.busy:
+            state = "changing"
+        elif not configured or state_check_error:
+            state = "unavailable"
         return {
-            "configured": self._configured(config),
+            "configured": configured,
             "mode": "lan" if config.ewelink_host else "cloud",
             "busy": self.busy,
             "model": config.ewelink_model,
             "open_channel": config.ewelink_open_channel,
             "close_channel": config.ewelink_close_channel,
-            "auto_close_seconds": config.auto_close_seconds,
-            "auto_close_armed": auto_close_armed,
-            "auto_close_remaining": auto_close_remaining,
             "state": state,
+            "state_source": state_source,
+            "last_command": last_command,
             "last_state_check": last_state_check,
             "state_check_error": state_check_error,
             "last_event": self.last_event,
@@ -484,8 +439,6 @@ class DoorController:
                 return False
             if action == "open":
                 self._last_trigger = now
-            else:
-                self._cancel_auto_close_locked()
         threading.Thread(
             target=self._activate,
             args=(config, reason, camera, match, action),
@@ -570,24 +523,54 @@ class DoorController:
             raise lan_error
         raise RuntimeError("No eWeLink LAN or cloud connection is configured")
 
+    def _position_sensor_state(self, config: Config) -> tuple[str | None, bool]:
+        device = self.database.ewelink_device(config.ewelink_device_id)
+        if not device or not any(
+            capability.get("type") == "binary_sensor"
+            and capability.get("id") == "door"
+            for capability in device.capabilities
+        ):
+            return None, False
+        if not device.available or device.online is False:
+            return None, True
+        value = device.params.get("door")
+        if type(value) is bool:
+            return ("open" if value else "closed"), True
+        if isinstance(value, str):
+            normalized = value.casefold()
+            if normalized in {"on", "open", "detected"}:
+                return "open", True
+            if normalized in {"off", "closed", "normal"}:
+                return "closed", True
+        return None, True
+
     def refresh_state(self) -> bool:
         with self._guard:
             config = self._config
         if not self._configured(config):
             return False
+        source = "momentary_relay"
         try:
-            switches = self._query_switches(config)
-            open_on = switches.get(config.ewelink_open_channel - 1) == "on"
-            close_on = switches.get(config.ewelink_close_channel - 1) == "on"
+            sensor_state, has_sensor = self._position_sensor_state(config)
+            if has_sensor:
+                source = "binary_sensor:door"
+            if has_sensor and sensor_state is None:
+                raise RuntimeError("Door position sensor is unavailable")
+            if has_sensor:
+                state = sensor_state
+            else:
+                switches = self._query_switches(config)
+                open_on = switches.get(config.ewelink_open_channel - 1) == "on"
+                close_on = switches.get(config.ewelink_close_channel - 1) == "on"
+                state = "changing" if open_on != close_on else "unknown"
             with self._guard:
-                if open_on != close_on:
-                    self._state = "open" if open_on else "closed"
-                    self.database.update_settings({"door_last_state": self._state})
+                self._state = state
+                self._state_source = source
                 recovered = bool(self._state_check_error)
                 self._state_check_error = ""
                 self._last_state_check = time.time()
             if recovered:
-                log.info("eWeLink relay state check recovered")
+                log.info("eWeLink door state check recovered")
             return True
         except (HTTPError, URLError, OSError, RuntimeError, ValueError) as error:
             if isinstance(error, HTTPError):
@@ -596,8 +579,10 @@ class DoorController:
             with self._guard:
                 changed = message != self._state_check_error
                 self._state_check_error = message
+                self._state = "unavailable"
+                self._state_source = source
             if changed:
-                log.warning("eWeLink relay state check failed: %s", error)
+                log.warning("eWeLink door state check failed: %s", error)
             return False
 
     @classmethod
@@ -677,11 +662,12 @@ class DoorController:
         )
         failure = None
         try:
-            self._send(config, channel, "on")
-            state = "open" if action == "open" else "closed"
             with self._guard:
-                self._state = state
-            self.database.update_settings({"door_last_state": state})
+                self._state = "changing"
+            self._send(config, channel, "on")
+            with self._guard:
+                self._last_command = action
+            self.database.update_settings({"door_last_command": action})
             self.last_event = f"Door {action} command sent for {reason}"
             self.last_error = ""
             self._record(f"door_{action}", self.last_event, camera, match)
@@ -692,9 +678,11 @@ class DoorController:
             failure = error
         finally:
             time.sleep(config.pulse_seconds)
+            shutoff_succeeded = False
             for attempt in range(3):
                 try:
                     self._send(config, channel, "off")
+                    shutoff_succeeded = True
                     break
                 except (HTTPError, URLError, OSError, RuntimeError) as error:
                     if isinstance(error, HTTPError):
@@ -706,14 +694,14 @@ class DoorController:
                         log.error(message)
                     else:
                         time.sleep(0.5)
+            with self._guard:
+                self._state = "unknown" if shutoff_succeeded else "unavailable"
             if failure:
                 message = f"Door control failed: {failure}"
                 self.last_error = message
                 self._record("door_error", message, camera, match)
                 log.error(message)
             self._busy.release()
-            if action == "open" and match is not None and failure is None:
-                self._arm_auto_close()
 
 
 def vision_runtime(config: Config, device: str) -> tuple[str, int, int]:
@@ -729,6 +717,72 @@ def vision_runtime(config: Config, device: str) -> tuple[str, int, int]:
 
 def detection_caption(track: dict) -> str:
     return f'{track.get("match") or track["label"]} · {track["confidence"]:.0%}'
+
+
+def authorized_presence_events(
+    previous: dict[int, Match], current: dict[int, Match], camera: Camera
+) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+
+    def payload(track_id: int, match: Match) -> dict:
+        return {
+            "camera_id": camera.id,
+            "camera_name": camera.name,
+            "track_id": track_id,
+            "profile_id": match.profile.id,
+            "profile_name": match.profile.name,
+            "label": match.profile.label,
+            "similarity": match.similarity,
+            "authorized": True,
+        }
+
+    for track_id in sorted(previous):
+        old = previous[track_id]
+        new = current.get(track_id)
+        if new is None or new.profile.id != old.profile.id:
+            events.append(
+                ("trigger.camera.authorized_disappeared", payload(track_id, old))
+            )
+    for track_id in sorted(current):
+        new = current[track_id]
+        old = previous.get(track_id)
+        if old is None or old.profile.id != new.profile.id:
+            events.append(
+                ("trigger.camera.authorized_appeared", payload(track_id, new))
+            )
+    if previous and not current:
+        events.append(
+            (
+                "trigger.camera.no_authorized_present",
+                {
+                    "camera_id": camera.id,
+                    "camera_name": camera.name,
+                    "authorized_count": 0,
+                },
+            )
+        )
+    return events
+
+
+def object_class_events(
+    previous: set[str], current: set[str], camera: Camera
+) -> list[tuple[str, dict]]:
+    events = []
+    for label in sorted(current - previous):
+        events.append(
+            (
+                "trigger.camera.class_appeared",
+                {"camera_id": camera.id, "camera_name": camera.name, "label": label},
+            )
+        )
+    for label in sorted(previous - current):
+        events.append(
+            (
+                "trigger.camera.class_disappeared",
+                {"camera_id": camera.id, "camera_name": camera.name, "label": label},
+            )
+        )
+    return events
 
 
 def spatial_layout_descriptor(crop: np.ndarray) -> np.ndarray:
@@ -791,17 +845,19 @@ class VisionSystem:
         camera: Camera,
         config: Config,
         database: Database,
-        door: DoorController,
+        event_sink=None,
     ):
         self.camera = camera
         self.config = config
         self.database = database
-        self.door = door
+        self.event_sink = event_sink or (lambda _kind, _payload: None)
         self.stop_event = threading.Event()
         self.state_lock = threading.Lock()
         self.capture_lock = threading.Lock()
         self.raw_frame: np.ndarray | None = None
         self.raw_sequence = 0
+        self.processed_frame: np.ndarray | None = None
+        self.processed_sequence = -1
         self.jpeg = self._message_frame(f"Starting {camera.name}...")
         self.tracks: list[dict] = []
         self.frame_size = (1280, 720)
@@ -809,7 +865,10 @@ class VisionSystem:
         self.vision_state = "starting"
         self.last_event = "Waiting for the camera"
         self.last_error = ""
-        self.profiles = database.all()
+        self.profiles = database.matching_profiles()
+        self.authorized_count = 0
+        self._authorized_tracks: dict[int, Match] = {}
+        self._object_labels: set[str] = set()
         self.thread: threading.Thread | None = None
 
     @staticmethod
@@ -825,6 +884,46 @@ class VisionSystem:
                 self.last_error = message
         (log.error if error else log.info)("%s: %s", self.camera.name, message)
 
+    def _emit(self, kind: str, payload: dict) -> None:
+        try:
+            self.event_sink(kind, payload)
+        except Exception:
+            log.exception("Camera event failed: %s", kind)
+
+    def _set_camera_state(self, state: str) -> None:
+        with self.state_lock:
+            previous = self.camera_state
+            self.camera_state = state
+        if state == "connected" and previous != "connected":
+            self._emit(
+                "trigger.camera.online",
+                {"camera_id": self.camera.id, "camera_name": self.camera.name},
+            )
+        elif state in {"unavailable", "reconnecting"} and previous not in {
+            "unavailable",
+            "reconnecting",
+        }:
+            self._emit(
+                "trigger.camera.offline",
+                {"camera_id": self.camera.id, "camera_name": self.camera.name},
+            )
+
+    def _publish_scene(
+        self, authorized_tracks: dict[int, Match], labels: set[str]
+    ) -> None:
+        with self.state_lock:
+            previous_tracks = dict(self._authorized_tracks)
+            previous_labels = set(self._object_labels)
+            self._authorized_tracks = dict(authorized_tracks)
+            self._object_labels = set(labels)
+            self.authorized_count = len(authorized_tracks)
+        for kind, payload in authorized_presence_events(
+            previous_tracks, authorized_tracks, self.camera
+        ):
+            self._emit(kind, payload)
+        for kind, payload in object_class_events(previous_labels, labels, self.camera):
+            self._emit(kind, payload)
+
     def start(self) -> None:
         self.thread = threading.Thread(
             target=self._run, daemon=True, name=f"vision-{self.camera.id}"
@@ -837,7 +936,7 @@ class VisionSystem:
             self.thread.join(timeout=5)
 
     def reload_profiles(self) -> None:
-        profiles = self.database.all()
+        profiles = self.database.matching_profiles()
         with self.state_lock:
             self.profiles = profiles
 
@@ -848,6 +947,24 @@ class VisionSystem:
             if track is None:
                 return None
             return track["label"], track["embedding"].copy()
+
+    def enrollment_snapshot(self):
+        with self.state_lock:
+            if self.processed_frame is None:
+                return None
+            tracks = [
+                {
+                    "id": track["id"],
+                    "label": track["label"],
+                    "box": tuple(track["box"]),
+                    "confidence": track["confidence"],
+                    "embedding": None
+                    if track.get("embedding") is None
+                    else track["embedding"].copy(),
+                }
+                for track in self.tracks
+            ]
+            return self.processed_sequence, self.processed_frame.copy(), tracks
 
     def snapshot(self) -> dict:
         with self.state_lock:
@@ -883,8 +1000,7 @@ class VisionSystem:
         while not self.stop_event.is_set():
             capture = _video_capture(url)
             if not capture.isOpened():
-                with self.state_lock:
-                    self.camera_state = "unavailable"
+                self._set_camera_state("unavailable")
                 if not failure_reported:
                     self.report(
                         _camera_connection_error(),
@@ -894,8 +1010,8 @@ class VisionSystem:
                 capture.release()
                 self.stop_event.wait(2)
                 continue
+            self._set_camera_state("connected")
             with self.state_lock:
-                self.camera_state = "connected"
                 self.last_error = ""
             failure_reported = False
             while not self.stop_event.is_set():
@@ -906,8 +1022,7 @@ class VisionSystem:
                     self.raw_frame = frame
                     self.raw_sequence += 1
             capture.release()
-            with self.state_lock:
-                self.camera_state = "reconnecting"
+            self._set_camera_state("reconnecting")
             self.stop_event.wait(1)
 
     def _run(self) -> None:
@@ -930,6 +1045,7 @@ class VisionSystem:
             gate = AccessGate(self.config.confirmations, self.config.cooldown)
             embeddings: dict[int, np.ndarray] = {}
             matches: dict[int, tuple[Match, str, float]] = {}
+            confirmed: dict[int, Match] = {}
             seen_sequence = -1
             processed = 0
             with self.state_lock:
@@ -1028,19 +1144,25 @@ class VisionSystem:
                             match.profile.id if match else None,
                             time.monotonic(),
                         ):
-                            if self.door.trigger(match.profile.name, self.camera, match):
-                                self.report(f"Access approved for {match.profile.name}")
+                            confirmed[track_id] = match
+                            self.report(f"Access approved for {match.profile.name}")
                 active_ids = {track["id"] for track in tracks}
                 gate.retain(active_ids)
                 for stale_id in set(embeddings) - active_ids:
                     embeddings.pop(stale_id, None)
                     matches.pop(stale_id, None)
+                confirmed = {
+                    track_id: approved
+                    for track_id, approved in confirmed.items()
+                    if track_id in active_ids
+                    and (current := matches.get(track_id)) is not None
+                    and current[0].profile.id == approved.profile.id
+                }
                 for track in tracks:
                     track["embedding"] = embeddings.get(track["id"])
                     if matched := matches.get(track["id"]):
                         track["match"], track["similarity"] = matched[1], matched[2]
-                if any(track.get("match") for track in tracks):
-                    self.door.authorized_seen()
+                self._publish_scene(confirmed, {track["label"] for track in tracks})
                 annotated = frame.copy()
                 for track in tracks:
                     x1, y1, x2, y2 = track["box"]
@@ -1074,6 +1196,8 @@ class VisionSystem:
                     self.jpeg = encoded
                     self.tracks = tracks
                     self.frame_size = (frame.shape[1], frame.shape[0])
+                    self.processed_frame = frame
+                    self.processed_sequence = seen_sequence
         except Exception as error:
             with self.state_lock:
                 self.vision_state = "failed"
@@ -1083,6 +1207,7 @@ class VisionSystem:
             log.exception("Vision worker %s failed", self.camera.id)
             self.report(f"Vision failed: {error}", True)
         finally:
+            self._publish_scene({}, set())
             self.stop_event.set()
             capture_thread.join(timeout=3)
 
@@ -1092,24 +1217,49 @@ class VisionManager:
         self.database = database
         self.config = config
         self.door = DoorController(config, database)
+        if not database.automations():
+            database.create_automation(
+                "Default smart door",
+                default_door_graph(config.auto_close_seconds),
+                enabled=True,
+            )
+        self.automation = AutomationEngine(
+            database, self._automation_action, self._automation_state
+        )
+        self.devices = EWeLinkDeviceManager(
+            database, EWELINK_CLOUD, event_sink=self.emit_event
+        )
         self.workers: dict[int, VisionSystem] = {}
         self.lock = threading.RLock()
         self.started = False
         self.placeholder = VisionSystem._message_frame("Camera is disabled")
+        self.enrollments = EnrollmentManager(
+            database, database.path.parent / "enrollments", self.worker
+        )
+
+    def worker(self, camera_id: int) -> VisionSystem | None:
+        with self.lock:
+            return self.workers.get(camera_id)
 
     def start(self) -> None:
         self.door.start()
+        self.automation.start()
+        self.devices.start()
+        self.enrollments.start_service()
         with self.lock:
             self.started = True
             if self.config.disable_vision:
                 return
             for camera in self.database.cameras():
                 if camera.enabled and camera.id not in self.workers:
-                    worker = VisionSystem(camera, self.config, self.database, self.door)
+                    worker = VisionSystem(
+                        camera, self.config, self.database, self.emit_event
+                    )
                     self.workers[camera.id] = worker
                     worker.start()
 
     def stop(self) -> None:
+        self.enrollments.shutdown()
         with self.lock:
             workers = list(self.workers.values())
             self.workers.clear()
@@ -1119,7 +1269,98 @@ class VisionManager:
 
     def shutdown(self) -> None:
         self.stop()
+        self.devices.stop()
+        self.automation.stop()
         self.door.stop()
+
+    def emit_event(self, kind: str, payload: dict) -> None:
+        try:
+            self.automation.emit(kind, payload)
+        except Exception:
+            log.exception("Automation event failed: %s", kind)
+
+    def automation_resources(self) -> dict:
+        devices = self.database.ewelink_devices()
+        return {
+            "camera_ids": {camera.id for camera in self.database.cameras()},
+            "device_ids": {device.device_id for device in devices},
+            "profile_ids": {profile.id for profile in self.database.all()},
+            "device_capabilities": {
+                device.device_id: device.capabilities for device in devices
+            },
+        }
+
+    def _automation_state(self, field: str, config: dict, _context: dict):
+        if field == "state.door":
+            return self.door.status()["state"]
+        if field in {"state.camera_online", "state.authorized_count"}:
+            with self.lock:
+                if config.get("camera_id") == "*":
+                    workers = list(self.workers.values())
+                    if field == "state.camera_online":
+                        return any(worker.camera_state == "connected" for worker in workers)
+                    return sum(worker.authorized_count for worker in workers)
+                worker = self.workers.get(config.get("camera_id"))
+            if field == "state.camera_online":
+                return bool(worker and worker.camera_state == "connected")
+            return worker.authorized_count if worker else 0
+        if field == "state.ewelink_property":
+            device = self.database.ewelink_device(config.get("device_id", ""))
+            return self.devices._known_state(device)[0].get(config.get("property")) if device else None
+        if field == "state.ewelink_online":
+            device = self.database.ewelink_device(config.get("device_id", ""))
+            return device.online if device else None
+        return None
+
+    def _automation_action(self, kind: str, config: dict, context: dict) -> dict:
+        if kind == "action.log":
+            message = config["message"]
+            self.database.add_event("automation_log", message)
+            log.info("Automation: %s", message)
+            return {"logged": True}
+        if kind.startswith("action.primary_door."):
+            action = kind.rsplit(".", 1)[1]
+            if action == "query":
+                self.door.refresh_state()
+                return self.door.status()
+            if not self.door.configured:
+                raise RuntimeError("Primary Door is not configured")
+            target = "open" if action == "open" else "closed"
+            if self.door.status()["state"] == target and not self.door.busy:
+                return {"state": target, "unchanged": True}
+            event = context.get("event", {})
+            reason = str(event.get("profile_name") or event.get("kind") or "automation")
+            if not self.door.trigger(reason, action=action):
+                raise RuntimeError("Primary Door is busy or cooling down")
+            deadline = time.monotonic() + 45
+            while self.door.busy and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self.door.busy:
+                raise RuntimeError("Primary Door command timed out")
+            if self.door.last_error:
+                raise RuntimeError(self.door.last_error)
+            return self.door.status()
+        if kind.startswith("action.ewelink."):
+            action = kind.rsplit(".", 1)[1]
+            arguments = {key: value for key, value in config.items() if key != "device_id"}
+            return self.devices.execute(config["device_id"], action, arguments)
+        if kind in {"action.camera.enable", "action.camera.disable"}:
+            camera = self.database.camera(config["camera_id"])
+            if not camera:
+                raise RuntimeError("Camera not found")
+            enabled = kind.endswith("enable")
+            updated = self.update_camera(
+                camera.id,
+                {
+                    "name": camera.name,
+                    "stream_url": camera.stream_url,
+                    "username": camera.username,
+                    "password": camera.password,
+                    "enabled": enabled,
+                },
+            )
+            return {"camera_id": updated.id, "enabled": updated.enabled}
+        raise RuntimeError("Unsupported automation action")
 
     def _replace_worker(self, camera: Camera) -> None:
         with self.lock:
@@ -1127,7 +1368,7 @@ class VisionManager:
         if previous:
             previous.stop()
         if camera.enabled and self.started and not self.config.disable_vision:
-            worker = VisionSystem(camera, self.config, self.database, self.door)
+            worker = VisionSystem(camera, self.config, self.database, self.emit_event)
             with self.lock:
                 self.workers[camera.id] = worker
             worker.start()
@@ -1254,6 +1495,7 @@ class VisionManager:
                         "tracks": [],
                     }
                 )
+        sample_counts = self.database.profile_sample_counts()
         return {
             "cameras": cameras,
             "door": self.door.status(),
@@ -1267,6 +1509,7 @@ class VisionManager:
                     "label": profile.label,
                     "created_at": profile.created_at,
                     "descriptor": "spatial" if profile.embedding.size > 576 else "legacy",
+                    "sample_count": sample_counts.get(profile.id, 0),
                 }
                 for profile in self.database.all()
             ],
@@ -1279,8 +1522,6 @@ class VisionManager:
 
 
 MANAGER = VisionManager(DATABASE, CONFIG)
-EWELINK_CLOUD = EWeLinkCloud()
-EWELINK_IMPORTS = ImportSessions()
 
 
 class LoginPayload(BaseModel):
@@ -1292,6 +1533,26 @@ class Enrollment(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     name: str = Field(min_length=1, max_length=60)
+
+
+class EnrollmentCommit(BaseModel):
+    sample_ids: list[str] = Field(min_length=1, max_length=64)
+    profile_id: int | None = Field(default=None, ge=1)
+    name: str = Field(default="", max_length=60)
+
+    @model_validator(mode="after")
+    def valid_target(self):
+        self.name = self.name.strip()
+        if self.profile_id is None and not self.name:
+            raise ValueError("A name is required for a new identity")
+        if any(
+            len(sample_id) > 32
+            or len(parts := sample_id.split("-")) != 2
+            or not all(part.isdigit() for part in parts)
+            for sample_id in self.sample_ids
+        ):
+            raise ValueError("Enrollment sample ID is invalid")
+        return self
 
 
 class DoorTest(BaseModel):
@@ -1322,6 +1583,10 @@ class CameraPayload(BaseModel):
         return self
 
 
+class CameraTestPayload(CameraPayload):
+    camera_id: int | None = Field(default=None, ge=1)
+
+
 class SettingsPayload(BaseModel):
     app_name: str = Field(min_length=1, max_length=40)
     brand_palette: str = Field(pattern=r"^(teal|blue|violet|orange)$")
@@ -1345,7 +1610,7 @@ class SettingsPayload(BaseModel):
     ewelink_open_channel: int = Field(ge=1, le=4)
     ewelink_close_channel: int = Field(ge=1, le=4)
     pulse_seconds: float = Field(ge=0.1, le=30)
-    auto_close_seconds: float = Field(ge=0, le=3600)
+    auto_close_seconds: float | None = Field(default=None, ge=0, le=3600)
 
     @model_validator(mode="after")
     def valid_door(self):
@@ -1354,15 +1619,10 @@ class SettingsPayload(BaseModel):
         self.ewelink_host = self.ewelink_host.strip()
         self.ewelink_device_id = self.ewelink_device_id.strip()
         self.ewelink_device_key = self.ewelink_device_key.strip()
-        identity = (self.ewelink_device_id, self.ewelink_device_key)
         if not self.app_name:
             raise ValueError("app name cannot be blank")
         if not self.ewelink_model:
             raise ValueError("eWeLink model cannot be blank")
-        if any(identity) and not all(identity):
-            raise ValueError("eWeLink device ID and device key are required together")
-        if self.ewelink_host and not all(identity):
-            raise ValueError("eWeLink IP requires a device ID and device key")
         if self.ewelink_open_channel == self.ewelink_close_channel:
             raise ValueError("open and close channels must be different")
         if self.ewelink_host:
@@ -1416,6 +1676,68 @@ class EWeLinkImportApply(BaseModel):
         return self
 
 
+class EWeLinkActionPayload(BaseModel):
+    confirm: bool = False
+    arguments: dict = Field(default_factory=dict)
+
+    @field_validator("arguments")
+    @classmethod
+    def valid_arguments(cls, value: dict) -> dict:
+        if len(value) > 16 or len(json.dumps(value)) > 4096:
+            raise ValueError("Device action arguments are too large")
+        return value
+
+
+class EWeLinkTestPayload(EWeLinkActionPayload):
+    action: str = Field(pattern=r"^(switch|button|light|cover|number|enum|refresh)$")
+
+
+class PrimaryDoorPayload(BaseModel):
+    host: str = Field(default="", max_length=45)
+    port: int = Field(default=8081, ge=1, le=65535)
+    open_channel: int = Field(default=1, ge=1, le=4)
+    close_channel: int = Field(default=2, ge=1, le=4)
+    pulse_seconds: float = Field(default=1, ge=0.1, le=30)
+
+    @model_validator(mode="after")
+    def valid_primary_door(self):
+        if self.open_channel == self.close_channel:
+            raise ValueError("open and close channels must be different")
+        self.host = self.host.strip()
+        if self.host:
+            try:
+                address = ipaddress.ip_address(self.host)
+            except ValueError as error:
+                raise ValueError("relay host must be a local IP address") from error
+            if not (address.is_private or address.is_loopback):
+                raise ValueError("relay host must be on the local network")
+            self.host = str(address)
+        return self
+
+
+class AutomationPayload(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    enabled: bool = False
+    graph: dict
+
+    @model_validator(mode="after")
+    def valid_document_size(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("automation name cannot be blank")
+        if len(json.dumps(self.graph)) > 250_000:
+            raise ValueError("automation graph is too large")
+        return self
+
+
+class AutomationValidationPayload(BaseModel):
+    graph: dict
+
+
+class ConfirmedAutomationRun(BaseModel):
+    confirm: bool = False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     MANAGER.start()
@@ -1424,6 +1746,14 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="VisionGate", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_request: Request, error: RequestValidationError):
+    return JSONResponse(
+        {"detail": [{key: item[key] for key in ("type", "loc", "msg") if key in item} for item in error.errors()]},
+        status_code=422,
+    )
 
 
 CONTENT_SECURITY_POLICY = "; ".join(
@@ -1458,6 +1788,7 @@ allowed_hosts = {
     socket.gethostname(),
     socket.getfqdn(),
     *local_ipv4_addresses(),
+    os.getenv("VISIONGATE_PUBLIC_HOST", "").strip(),
     *(host.strip() for host in os.getenv("VISIONGATE_ALLOWED_HOSTS", "").split(",")),
 }
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(filter(None, allowed_hosts)))
@@ -1611,6 +1942,11 @@ def dashboard():
     return FileResponse(ROOT / "static" / "index.html")
 
 
+@app.get("/automations", include_in_schema=False)
+def automation_editor():
+    return FileResponse(ROOT / "static" / "automations.html")
+
+
 @app.get("/logo.png", include_in_schema=False)
 def logo():
     custom = DATA_DIR / "logo.png"
@@ -1669,6 +2005,11 @@ def dashboard_script():
     return FileResponse(ROOT / "static" / "dashboard.js", media_type="text/javascript")
 
 
+@app.get("/automations.js", include_in_schema=False)
+def automations_script():
+    return FileResponse(ROOT / "static" / "automations.js", media_type="text/javascript")
+
+
 @app.get("/api/network")
 def network_access():
     addresses = local_ipv4_addresses()
@@ -1702,30 +2043,282 @@ def system_status():
     return MANAGER.status()
 
 
-@app.get("/api/config")
-def configuration():
-    settings = DATABASE.settings()
+def _public_camera(camera: Camera) -> dict:
+    return {
+        "id": camera.id,
+        "name": camera.name,
+        "stream_url": camera.stream_url,
+        "username": camera.username,
+        "password_configured": bool(camera.password),
+        "enabled": camera.enabled,
+        "created_at": camera.created_at,
+        "updated_at": camera.updated_at,
+    }
+
+
+def _public_settings(settings: dict) -> dict:
+    public = dict(settings)
+    public["ewelink_device_key_configured"] = bool(public.get("ewelink_device_key"))
     for key in (
+        "ewelink_device_key",
         "ewelink_cloud_token",
         "ewelink_cloud_app_id",
         "ewelink_cloud_region",
+        "ewelink_cloud_user_apikey",
         "door_last_state",
     ):
-        settings.pop(key, None)
+        public.pop(key, None)
+    return public
+
+
+@app.get("/api/config")
+def configuration():
     return {
-        "cameras": [asdict(camera) for camera in DATABASE.cameras()],
-        "settings": settings,
+        "cameras": [_public_camera(camera) for camera in DATABASE.cameras()],
+        "settings": _public_settings(DATABASE.settings()),
     }
+
+
+@app.get("/api/devices")
+def devices():
+    camera_states = {
+        camera["id"]: camera for camera in MANAGER.status().get("cameras", [])
+    }
+    return {
+        "cameras": [
+            {
+                "id": camera.id,
+                "name": camera.name,
+                "enabled": camera.enabled,
+                "camera": camera_states.get(camera.id, {}).get("camera", "unknown"),
+                "vision": camera_states.get(camera.id, {}).get("vision", "unknown"),
+            }
+            for camera in MANAGER.database.cameras()
+        ],
+        "ewelink": MANAGER.devices.list_public(),
+        "identities": [
+            {"id": profile.id, "name": profile.name, "label": profile.label}
+            for profile in MANAGER.database.all()
+        ],
+    }
+
+
+@app.get("/api/ewelink/devices")
+def ewelink_devices():
+    return MANAGER.devices.list_public()
+
+
+@app.post("/api/ewelink/devices/refresh")
+def refresh_ewelink_devices():
+    try:
+        return MANAGER.devices.refresh()
+    except (EWeLinkCloudError, RuntimeError, ValueError) as error:
+        raise HTTPException(502, str(error)) from error
+
+
+@app.get("/api/ewelink/devices/{device_id}")
+def ewelink_device(device_id: str):
+    device = MANAGER.database.ewelink_device(device_id)
+    if not device:
+        raise HTTPException(404, "eWeLink device not found")
+    return MANAGER.devices.public(device)
+
+
+@app.post("/api/ewelink/devices/{device_id}/primary-door")
+def use_ewelink_device_as_primary_door(
+    device_id: str, payload: PrimaryDoorPayload
+):
+    device = MANAGER.database.ewelink_device(device_id)
+    if not device:
+        raise HTTPException(404, "eWeLink device not found")
+    channels = next(
+        (
+            capability.get("channels", [])
+            for capability in device.capabilities
+            if capability.get("type") == "channels"
+        ),
+        [],
+    )
+    if payload.open_channel not in channels or payload.close_channel not in channels:
+        raise HTTPException(422, "Select open and close channels supported by this device")
+    try:
+        settings = MANAGER.update_settings(
+            {
+                "ewelink_model": device.model or device.name,
+                "ewelink_host": payload.host or device.host,
+                "ewelink_port": payload.port,
+                "ewelink_device_id": device.device_id,
+                "ewelink_device_key": device.device_key,
+                "ewelink_open_channel": payload.open_channel,
+                "ewelink_close_channel": payload.close_channel,
+                "pulse_seconds": payload.pulse_seconds,
+            }
+        )
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return {
+        "configured": True,
+        "device": MANAGER.devices.public(device),
+        "settings": _public_settings(settings),
+    }
+
+
+def _run_ewelink_action(
+    device_id: str, action: str, payload: EWeLinkActionPayload
+):
+    if action != "refresh" and not payload.confirm:
+        raise HTTPException(400, "Confirmation required")
+    try:
+        return MANAGER.devices.execute(device_id, action, payload.arguments)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(502, str(error)) from error
+
+
+@app.post("/api/ewelink/devices/{device_id}/actions/{action}")
+def run_ewelink_action(
+    device_id: str,
+    action: str,
+    payload: EWeLinkActionPayload,
+):
+    if action not in {"switch", "button", "light", "cover", "number", "enum", "refresh"}:
+        raise HTTPException(404, "Unsupported eWeLink action")
+    return _run_ewelink_action(device_id, action, payload)
+
+
+@app.post("/api/ewelink/devices/{device_id}/test")
+def test_ewelink_device(device_id: str, payload: EWeLinkTestPayload):
+    return _run_ewelink_action(device_id, payload.action, payload)
+
+
+def _validated_automation(graph: dict) -> dict:
+    try:
+        return validate_graph(graph, MANAGER.automation_resources())
+    except GraphValidationError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.get("/api/automations")
+def automations():
+    return [asdict(item) for item in MANAGER.database.automations()]
+
+
+@app.post("/api/automations/validate")
+def validate_automation(payload: AutomationValidationPayload):
+    return {"valid": True, "graph": _validated_automation(payload.graph)}
+
+
+@app.post("/api/automations", status_code=201)
+def create_automation(payload: AutomationPayload):
+    graph = _validated_automation(
+        {**payload.graph, "name": payload.name, "enabled": payload.enabled}
+    )
+    try:
+        item = MANAGER.database.create_automation(
+            payload.name, graph, enabled=payload.enabled
+        )
+        MANAGER.automation.initialize_schedules()
+        return asdict(item)
+    except GraphValidationError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.get("/api/automations/{automation_id}")
+def automation(automation_id: int):
+    item = MANAGER.database.automation(automation_id)
+    if not item:
+        raise HTTPException(404, "Automation not found")
+    return asdict(item)
+
+
+@app.put("/api/automations/{automation_id}")
+def update_automation(automation_id: int, payload: AutomationPayload):
+    graph = _validated_automation(
+        {**payload.graph, "name": payload.name, "enabled": payload.enabled}
+    )
+    try:
+        item = MANAGER.database.update_automation(
+            automation_id, payload.name, graph, payload.enabled
+        )
+    except GraphValidationError as error:
+        raise HTTPException(422, str(error)) from error
+    if not item:
+        raise HTTPException(404, "Automation not found")
+    MANAGER.automation.initialize_schedules()
+    return asdict(item)
+
+
+@app.delete("/api/automations/{automation_id}")
+def delete_automation(automation_id: int):
+    if not MANAGER.database.delete_automation(automation_id):
+        raise HTTPException(404, "Automation not found")
+    MANAGER.automation.initialize_schedules()
+    return {"deleted": True}
+
+
+@app.post("/api/automations/{automation_id}/validate")
+def validate_saved_automation(automation_id: int):
+    item = MANAGER.database.automation(automation_id)
+    if not item:
+        raise HTTPException(404, "Automation not found")
+    return {"valid": True, "graph": _validated_automation(item.graph)}
+
+
+@app.post("/api/automations/{automation_id}/dry-run")
+def dry_run_automation(automation_id: int):
+    try:
+        run = MANAGER.automation.run_automation(
+            automation_id, dry_run=True, wait=True
+        )
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return asdict(run)
+
+
+@app.post("/api/automations/{automation_id}/run")
+def run_automation(automation_id: int, payload: ConfirmedAutomationRun):
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmation required")
+    try:
+        run = MANAGER.automation.run_automation(automation_id, wait=True)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return asdict(run)
+
+
+@app.get("/api/automations/{automation_id}/runs")
+def automation_runs(
+    automation_id: int, limit: int = Query(default=100, ge=1, le=1000)
+):
+    if not MANAGER.database.automation(automation_id):
+        raise HTTPException(404, "Automation not found")
+    return [
+        asdict(item)
+        for item in MANAGER.database.automation_runs(automation_id, limit)
+    ]
 
 
 @app.post("/api/cameras", status_code=201)
 def add_camera(payload: CameraPayload):
-    return asdict(MANAGER.add_camera(payload.model_dump()))
+    return _public_camera(MANAGER.add_camera(payload.model_dump()))
 
 
 @app.post("/api/cameras/test")
-def test_camera_connection(payload: CameraPayload):
-    url = camera_stream_url(payload.stream_url, payload.username, payload.password)
+def test_camera_connection(payload: CameraTestPayload):
+    password = payload.password
+    if not password and payload.camera_id:
+        existing = DATABASE.camera(payload.camera_id)
+        if not existing:
+            raise HTTPException(404, "Camera not found")
+        password = existing.password
+    url = camera_stream_url(payload.stream_url, payload.username, password)
     capture = _video_capture(url)
     try:
         if not capture.isOpened():
@@ -1741,10 +2334,16 @@ def test_camera_connection(payload: CameraPayload):
 
 @app.put("/api/cameras/{camera_id}")
 def update_camera(camera_id: int, payload: CameraPayload):
-    camera = MANAGER.update_camera(camera_id, payload.model_dump())
+    existing = DATABASE.camera(camera_id)
+    if not existing:
+        raise HTTPException(404, "Camera not found")
+    values = payload.model_dump()
+    if not values["password"]:
+        values["password"] = existing.password
+    camera = MANAGER.update_camera(camera_id, values)
     if not camera:
         raise HTTPException(404, "Camera not found")
-    return asdict(camera)
+    return _public_camera(camera)
 
 
 @app.delete("/api/cameras/{camera_id}")
@@ -1757,10 +2356,14 @@ def delete_camera(camera_id: int):
 @app.put("/api/settings")
 def update_settings(payload: SettingsPayload):
     try:
-        settings = MANAGER.update_settings(payload.model_dump())
-        for key in ("ewelink_cloud_token", "ewelink_cloud_app_id", "ewelink_cloud_region"):
-            settings.pop(key, None)
-        return settings
+        values = payload.model_dump(exclude_none=True)
+        current = DATABASE.settings()
+        if not values["ewelink_device_key"]:
+            if values["ewelink_device_id"] == current.get("ewelink_device_id"):
+                values.pop("ewelink_device_key")
+            elif values["ewelink_device_id"]:
+                raise ValueError("Enter the device key when changing the device ID")
+        return _public_settings(MANAGER.update_settings(values))
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
 
@@ -1839,12 +2442,19 @@ def ewelink_password_import(payload: EWeLinkPasswordImport, request: Request):
 @app.post("/api/ewelink/import/apply")
 def ewelink_import_apply(payload: EWeLinkImportApply):
     try:
-        device = EWELINK_IMPORTS.take(payload.session_id, payload.device_id)
+        device, devices = EWELINK_IMPORTS.take_all(payload.session_id, payload.device_id)
+        discovered_host = str(device.get("host") or "")
+        selected_host = discovered_host or (
+            "" if device.get("_cloud_token") else payload.host
+        )
+        selected_port = payload.port or int(device.get("port") or 8081)
+        device["host"], device["port"] = selected_host, selected_port
+        MANAGER.devices.import_devices(devices)
         MANAGER.update_settings(
             {
                 "ewelink_model": device["model"],
-                "ewelink_host": payload.host,
-                "ewelink_port": payload.port,
+                "ewelink_host": selected_host,
+                "ewelink_port": selected_port,
                 "ewelink_device_id": device["id"],
                 "ewelink_device_key": device["device_key"],
                 "ewelink_cloud_token": device.get("_cloud_token", ""),
@@ -1863,7 +2473,145 @@ def ewelink_import_apply(payload: EWeLinkImportApply):
         "configured": True,
         "device_id": device["id"],
         "name": device["name"],
+        "mode": "lan" if selected_host else "cloud",
     }
+
+
+@app.post("/api/cameras/{camera_id}/enrollment/start", status_code=201)
+def start_enrollment(camera_id: int):
+    if not DATABASE.camera(camera_id):
+        raise HTTPException(404, "Camera not found")
+    try:
+        return MANAGER.enrollments.start(camera_id)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@app.post("/api/enrollments/{session_id}/stop")
+def stop_enrollment(session_id: str):
+    try:
+        return MANAGER.enrollments.stop(session_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@app.get("/api/enrollments/{session_id}")
+def enrollment_review(session_id: str):
+    try:
+        return MANAGER.enrollments.metadata(session_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@app.get("/api/enrollments/{session_id}/frames/{frame_id}.jpg")
+def enrollment_frame(session_id: str, frame_id: int):
+    try:
+        path = MANAGER.enrollments.frame_path(session_id, frame_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store", "Content-Disposition": "inline"},
+    )
+
+
+@app.get("/api/enrollments/{session_id}/samples/{sample_id}.jpg")
+def enrollment_sample_thumbnail(session_id: str, sample_id: str):
+    try:
+        content = MANAGER.enrollments.sample_thumbnail(session_id, sample_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    return Response(
+        content,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store", "Content-Disposition": "inline"},
+    )
+
+
+@app.post("/api/enrollments/{session_id}/commit", status_code=201)
+def commit_enrollment(session_id: str, payload: EnrollmentCommit):
+    try:
+        result = MANAGER.enrollments.commit(
+            session_id,
+            sample_ids=payload.sample_ids,
+            profile_id=payload.profile_id,
+            name=payload.name,
+        )
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    profile = result["profile"]
+    DATABASE.add_event(
+        "profile_samples_added",
+        f"Added {result['added']} visual sample(s) for {profile['name']}",
+        profile_id=profile["id"],
+        profile_name=profile["name"],
+        label=profile["label"],
+    )
+    MANAGER.reload_profiles()
+    return result
+
+
+@app.delete("/api/enrollments/{session_id}")
+def cancel_enrollment(session_id: str):
+    try:
+        MANAGER.enrollments.metadata(session_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    MANAGER.enrollments.cancel(session_id)
+    return {"deleted": True}
+
+
+@app.get("/api/profiles/{profile_id}/samples")
+def profile_samples(profile_id: int):
+    if not any(profile.id == profile_id for profile in DATABASE.all()):
+        raise HTTPException(404, "Profile not found")
+    return [
+        {
+            "id": sample.id,
+            "profile_id": sample.profile_id,
+            "label": sample.label,
+            "created_at": sample.created_at,
+            "thumbnail_url": f"/api/profiles/{profile_id}/samples/{sample.id}/thumbnail"
+            if sample.thumbnail
+            else None,
+        }
+        for sample in DATABASE.profile_samples(profile_id)
+    ]
+
+
+@app.get("/api/profiles/{profile_id}/samples/{sample_id}/thumbnail")
+def profile_sample_thumbnail(profile_id: int, sample_id: int):
+    sample = next(
+        (
+            item
+            for item in DATABASE.profile_samples(profile_id)
+            if item.id == sample_id and item.thumbnail
+        ),
+        None,
+    )
+    if not sample:
+        raise HTTPException(404, "Sample thumbnail not found")
+    return Response(
+        sample.thumbnail,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=300", "Content-Disposition": "inline"},
+    )
+
+
+@app.delete("/api/profiles/{profile_id}/samples/{sample_id}")
+def delete_profile_sample(profile_id: int, sample_id: int):
+    samples = DATABASE.profile_samples(profile_id)
+    if not any(sample.id == sample_id for sample in samples):
+        raise HTTPException(404, "Sample not found")
+    if len(samples) <= 1:
+        raise HTTPException(409, "An identity must keep at least one sample")
+    if not DATABASE.delete_sample(profile_id, sample_id):
+        raise HTTPException(409, "Sample could not be removed")
+    MANAGER.reload_profiles()
+    return {"deleted": True}
 
 
 @app.post("/api/cameras/{camera_id}/whitelist", status_code=201)
@@ -1894,6 +2642,16 @@ def events(limit: int = Query(100, ge=1, le=1000)):
 @app.delete("/api/events")
 def clear_events():
     return {"deleted": DATABASE.clear_events()}
+
+
+@app.post("/api/door/refresh")
+def refresh_door_state():
+    try:
+        MANAGER.devices.refresh()
+    except Exception:
+        log.warning("eWeLink inventory refresh failed during door state check")
+    MANAGER.door.refresh_state()
+    return MANAGER.door.status()
 
 
 @app.post("/api/door/test")

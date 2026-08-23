@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Install", "Update", "Check", "Plan", "SourceUpdate")]
+    [ValidateSet("Install", "Update", "Check", "Plan", "Backup", "SourceUpdate")]
     [string]$Action = "Install",
     [ValidateSet("Auto", "CPU", "CUDA")]
     [string]$Backend = "Auto"
@@ -10,6 +10,10 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $venvPython = Join-Path $root ".venv\Scripts\python.exe"
 $torchVersion = "2.12.1"
 $torchvisionVersion = "0.27.1"
+$appFiles = @(
+    "app.py", "auth.py", "automation.py", "core.py", "enrollment.py",
+    "ewelink_cloud.py", "ewelink_devices.py"
+)
 
 function Invoke-NativeProbe {
     param([scriptblock]$Command)
@@ -85,6 +89,32 @@ function Find-Python311 {
 try {
     Set-Location -LiteralPath $root
 
+    if ($Action -eq "Backup") {
+        $envFile = Join-Path $root ".env"
+        $dataDirectory = Join-Path $root "data"
+        if (-not (Test-Path -LiteralPath $envFile) -and -not (Test-Path -LiteralPath $dataDirectory)) {
+            Write-Host "No runtime data needs a pre-update backup."
+            exit 0
+        }
+        $destination = Join-Path (Join-Path $root "backups") ("pre-update-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff"))
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        if (Test-Path -LiteralPath $envFile) {
+            Copy-Item -LiteralPath $envFile -Destination $destination
+        }
+        if (Test-Path -LiteralPath $dataDirectory) {
+            Copy-Item -LiteralPath $dataDirectory -Destination $destination -Recurse
+            $sourceDatabase = Join-Path $dataDirectory "whitelist.db"
+            $backupDatabase = Join-Path (Join-Path $destination "data") "whitelist.db"
+            if ((Test-Path -LiteralPath $sourceDatabase) -and (Test-Path -LiteralPath $venvPython)) {
+                Remove-Item -LiteralPath $backupDatabase -Force -ErrorAction SilentlyContinue
+                & $venvPython -c "import sqlite3,sys; source=sqlite3.connect(sys.argv[1]); target=sqlite3.connect(sys.argv[2]); source.backup(target); target.close(); source.close()" $sourceDatabase $backupDatabase
+                if ($LASTEXITCODE -ne 0) { throw "Could not create a consistent SQLite backup" }
+            }
+        }
+        Write-Host "Pre-update backup saved to $destination" -ForegroundColor Green
+        exit 0
+    }
+
     if ($Action -eq "SourceUpdate") {
         if (-not (Test-Path -LiteralPath (Join-Path $root ".git"))) {
             Write-Host "Standalone copy detected; application files were not downloaded."
@@ -119,6 +149,7 @@ try {
         if (-not (Test-Path -LiteralPath $venvPython)) { throw "VisionGate is not installed" }
         Invoke-VisionGatePython @("-m", "pip", "check")
         Invoke-VisionGatePython @("-c", "import sys; from importlib.util import find_spec; required=('auth','cv2','fastapi','lap','torch','torchvision','ultralytics','uvicorn','zeroconf','Crypto.Cipher'); missing=[name for name in required if find_spec(name) is None]; sys.exit('Missing packages: ' + ', '.join(missing)) if missing else print('VisionGate is ready.')")
+        Invoke-VisionGatePython (@("-m", "py_compile") + $appFiles)
         exit 0
     }
 
@@ -164,6 +195,7 @@ try {
 
     Write-Host "Downloading the vision model files if needed..." -ForegroundColor Cyan
     Invoke-VisionGatePython @("-c", "from ultralytics import YOLO; from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small; YOLO('yolo11n.pt'); mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)")
+    Invoke-VisionGatePython (@("-m", "py_compile") + $appFiles)
 
     if (-not (Test-Path -LiteralPath (Join-Path $root ".env"))) {
         Copy-Item -LiteralPath (Join-Path $root ".env.example") -Destination (Join-Path $root ".env")

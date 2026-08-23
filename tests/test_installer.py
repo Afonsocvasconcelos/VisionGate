@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,8 +133,28 @@ class InstallerTests(unittest.TestCase):
 
         self.assertIn('if ($Action -eq "SourceUpdate")', setup_script)
         self.assertIn("Git.Git", setup_script)
+        self.assertIn("-Action Backup", updater)
+        self.assertLess(updater.index("-Action Backup"), updater.index("-Action SourceUpdate"))
         self.assertIn("-Action SourceUpdate", updater)
         self.assertNotIn("git pull", updater)
+
+    def test_setup_checks_every_application_module_and_preserves_runtime_data(self):
+        setup_script = SETUP.read_text(encoding="utf-8")
+        ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        for module in (
+            "app.py",
+            "auth.py",
+            "automation.py",
+            "core.py",
+            "enrollment.py",
+            "ewelink_cloud.py",
+            "ewelink_devices.py",
+        ):
+            self.assertIn(module, setup_script)
+        self.assertIn('Join-Path $root ".env"', setup_script)
+        self.assertIn('Join-Path $root "data"', setup_script)
+        self.assertIn("backups/", ignore)
 
     def test_launcher_can_query_the_lan_address_without_cmd_quote_corruption(self):
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
@@ -250,6 +271,30 @@ class InstallerTests(unittest.TestCase):
             json.loads(result.stdout.strip().splitlines()[-1])["public_url"],
             "http://203.0.113.10:83",
         )
+
+    def test_public_host_setting_is_automatically_trusted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment["DATA_DIR"] = directory
+            environment["DISABLE_VISION"] = "1"
+            environment["VISIONGATE_PUBLIC_HOST"] = "cacv.dyndns.org"
+            environment["VISIONGATE_ALLOWED_HOSTS"] = ""
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from fastapi.testclient import TestClient; from app import app; "
+                    "response=TestClient(app, base_url='http://cacv.dyndns.org:83').get('/login'); "
+                    "raise SystemExit(0 if response.status_code == 200 else 1)",
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_launcher_uses_only_direct_http_port_83(self):
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
