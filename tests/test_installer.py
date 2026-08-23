@@ -187,13 +187,25 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("is not recognized", result.stdout + result.stderr)
 
-    def test_launcher_reuses_an_existing_healthy_server_before_starting_uvicorn(self):
+    def test_launcher_reuses_current_server_and_restarts_stale_server(self):
         launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
 
         self.assertIn("http://127.0.0.1:83/health", launcher)
         self.assertIn("VisionGate is already running", launcher)
+        self.assertIn("source_version", launcher)
+        self.assertIn("Stop-Process", launcher)
         self.assertLess(
             launcher.index("http://127.0.0.1:83/health"),
+            launcher.index("-m uvicorn"),
+        )
+
+    def test_launcher_pins_runtime_data_to_its_own_installation(self):
+        launcher = (ROOT / "Launch VisionGate.bat").read_text(encoding="utf-8")
+
+        self.assertIn('set "DATA_DIR=%~dp0data"', launcher)
+        self.assertIn("data_location", launcher)
+        self.assertLess(
+            launcher.index('set "DATA_DIR=%~dp0data"'),
             launcher.index("-m uvicorn"),
         )
 

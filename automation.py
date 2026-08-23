@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as clock_time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+
+log = logging.getLogger("visiongate.automation")
 
 
 TRIGGER_KINDS = {
@@ -952,6 +956,13 @@ class AutomationEngine:
             except Exception as exception:
                 outcome, detail = "failure", {}
                 error = sanitize_automation_value(str(exception))[:500]
+                log.error(
+                    "Automation %s run %d node %s failed: %s",
+                    automation.name,
+                    run_id,
+                    node_id,
+                    error,
+                )
             with result_guard:
                 results.append(
                     {

@@ -3,6 +3,7 @@ setlocal
 cd /d "%~dp0"
 title VisionGate
 
+set "DATA_DIR=%~dp0data"
 set "VISIONGATE_PYTHON=.venv\Scripts\python.exe"
 set "VISIONGATE_SETUP=%~dp0scripts\Setup VisionGate.ps1"
 
@@ -29,14 +30,31 @@ if defined VISIONGATE_PUBLIC_HOST (
     set "VISIONGATE_URL=http://%VISIONGATE_PUBLIC_HOST%:83"
 )
 
-powershell.exe -NoProfile -Command "$ProgressPreference='SilentlyContinue'; try { $health=Invoke-RestMethod -Uri 'http://127.0.0.1:83/health' -TimeoutSec 2; if($health.ok){exit 0} } catch {}; exit 1" >nul 2>&1
+set "VISIONGATE_SOURCE_VERSION="
+for /f "delims=" %%I in ('%VISIONGATE_PYTHON% -c "from pathlib import Path; print(max(p.stat().st_mtime_ns for p in Path('.').glob('*.py')))"') do set "VISIONGATE_SOURCE_VERSION=%%I"
+if not defined VISIONGATE_SOURCE_VERSION goto :failed
+
+powershell.exe -NoProfile -Command "$ProgressPreference='SilentlyContinue'; try { $health=Invoke-RestMethod -Uri 'http://127.0.0.1:83/health' -TimeoutSec 2; if($health.ok -and [string]$health.source_version -eq '%VISIONGATE_SOURCE_VERSION%' -and $health.data_location -eq 'local'){exit 0}; if($health.ok){exit 2} } catch {}; exit 1" >nul 2>&1
+if errorlevel 2 goto :restart_updated
 if not errorlevel 1 (
     echo.
     echo VisionGate is already running at %VISIONGATE_URL%
     start "VisionGate Browser" /min powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process '%VISIONGATE_URL%'"
     exit /b 0
 )
+goto :check_port
 
+:restart_updated
+echo Reloading updated VisionGate files...
+powershell.exe -NoProfile -Command "$connection=Get-NetTCPConnection -LocalPort 83 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if(-not $connection){exit 0}; $process=Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $connection.OwningProcess); if($process.CommandLine -notmatch '(?i)-m\s+uvicorn\s+app:app'){exit 1}; Stop-Process -Id $connection.OwningProcess -Force; for($i=0;$i -lt 30;$i++){if(-not (Get-NetTCPConnection -LocalPort 83 -State Listen -ErrorAction SilentlyContinue)){exit 0}; Start-Sleep -Milliseconds 100}; exit 1" >nul 2>&1
+if errorlevel 1 (
+    echo Could not safely stop the outdated VisionGate process.
+    echo Close its old window, then launch VisionGate again.
+    pause
+    exit /b 1
+)
+
+:check_port
 powershell.exe -NoProfile -Command "if(Get-NetTCPConnection -LocalPort 83 -State Listen -ErrorAction SilentlyContinue){exit 0}else{exit 1}" >nul 2>&1
 if not errorlevel 1 (
     echo.

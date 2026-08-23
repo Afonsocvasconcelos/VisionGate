@@ -35,15 +35,17 @@ from app import (
     DEFAULT_SETTINGS,
     DoorController,
     VisionManager,
+    VisionSystem,
     _config,
     authorized_presence_events,
+    confirm_authorized_tracks,
     detection_caption,
     object_class_events,
     app,
     spatial_layout_descriptor,
     vision_runtime,
 )
-from core import Database, Match, Profile
+from core import AccessGate, Database, Match, Profile
 from ewelink_devices import EWeLinkDeviceManager
 from enrollment import EnrollmentManager
 
@@ -661,6 +663,45 @@ class AppearanceTests(unittest.TestCase):
         self.assertEqual(classes[0][1]["label"], "car")
         self.assertEqual(arrived[0][1]["profile_name"], "Alice")
 
+    def test_cached_visual_match_reaches_confirmation_on_consecutive_frames(self):
+        profile = Profile(7, "Alice", "person", np.ones(2, np.float32), "now")
+        match = Match(profile, 0.94)
+        gate = AccessGate(confirmations=3, cooldown_seconds=0)
+        tracks = [{"id": 21, "label": "person", "box": (0, 0, 80, 160)}]
+        matches = {21: (match, "Alice", 0.94)}
+        confirmed = {}
+
+        self.assertEqual(
+            confirm_authorized_tracks(gate, tracks, matches, confirmed, now=1), []
+        )
+        self.assertEqual(
+            confirm_authorized_tracks(gate, tracks, matches, confirmed, now=2), []
+        )
+        self.assertEqual(confirmed, {})
+
+        approved = confirm_authorized_tracks(gate, tracks, matches, confirmed, now=3)
+        self.assertEqual(approved, [(21, match)])
+        self.assertEqual(confirmed, {21: match})
+
+    def test_new_approval_is_emitted_even_if_scene_already_contains_the_track(self):
+        camera = type("Camera", (), {"id": 3, "name": "Front"})()
+        profile = Profile(7, "Alice", "person", np.ones(2, np.float32), "now")
+        match = Match(profile, 0.94)
+        events = []
+        worker = VisionSystem.__new__(VisionSystem)
+        worker.camera = camera
+        worker.state_lock = threading.Lock()
+        worker._authorized_tracks = {21: match}
+        worker._object_labels = {"person"}
+        worker.authorized_count = 1
+        worker.event_sink = lambda kind, payload: events.append((kind, payload))
+
+        worker._publish_scene({21: match}, {"person"}, {21: match})
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "trigger.camera.authorized_presence")
+        self.assertTrue(events[0][1]["present"])
+
 
 class WebAccessTests(unittest.TestCase):
     def test_global_authorized_count_includes_every_camera(self):
@@ -754,6 +795,15 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(status.status_code, 401)
         self.assertEqual(login.status_code, 200)
         self.assertIn('id="title">Sign in', login.text)
+
+    def test_health_identifies_the_running_source_version(self):
+        with BaseTestClient(app) as client:
+            response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["app"], "VisionGate")
+        self.assertTrue(response.json()["source_version"].isdigit())
+        self.assertEqual(response.json()["data_location"], "external")
 
     def test_login_uses_a_secure_server_side_session_and_csrf_token(self):
         with BaseTestClient(app, base_url="https://testserver") as client:

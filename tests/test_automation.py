@@ -1011,9 +1011,11 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
             automation = database.create_automation("Conditional", graph, enabled=True)
             engine = AutomationEngine(database, handler)
 
-            run = engine.run_automation(automation.id, wait=True)
+            with self.assertLogs("visiongate.automation", level="ERROR") as logged:
+                run = engine.run_automation(automation.id, wait=True)
 
             self.assertEqual(run.status, "completed")
+            self.assertIn("relay unavailable", " ".join(logged.output))
             self.assertEqual(
                 actions, ["action.ewelink.button", "action.log"]
             )

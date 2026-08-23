@@ -56,7 +56,7 @@ Double-click **Launch VisionGate.bat**. It checks the installation, requests a o
 
 The console prints the current `http://192.168.x.x:83` address for phones and other local devices.
 
-Choose an automation on the responsive dashboard to show only the cameras, eWeLink devices, and manual control used by that automation. Choose **Customize** to remove, restore, drag, or move those controls; the order is saved separately for every automation. A manual activator adds **Test safely** (no hardware changes) and a confirmed **Run now**. Disabling an automation pauses automatic triggers; explicit manual runs remain available.
+Choose an automation on the responsive dashboard to show only the cameras, eWeLink devices, and manual control used by that automation. Choose **Customize** to remove, restore, drag, or move those controls; the order is saved separately for every automation. Every activator is a start node: its matching event follows the same execution path as Manual. A manual activator adds **Test safely** (no hardware changes) and a confirmed **Run now**. Disabling an automation pauses automatic triggers; explicit manual runs remain available.
 
 The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Authorized identities remain available beside the selected automation; diagnostics and routine history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
 

@@ -89,6 +89,10 @@ The dashboard uses record → review → select → save:
 
 Automations are versioned, acyclic JSON graphs shared by the runtime and both editors.
 
+Every activator is a root/start node. A matching camera, device, schedule, or manual event starts at that activator's outgoing edges through the same run executor; activators cannot have incoming edges.
+
+Visual authorization emits its `present` event directly from the one-shot AccessGate approval, after updating the camera's authorized state. Scene transitions continue to emit `absent`; the console reports how many runs each event starts and any sanitized node/action failure.
+
 The dashboard is derived from the selected graph. It offers modules only for cameras, eWeLink devices, and a manual trigger actually used by that automation. Users can remove, restore, drag, or move modules, and SQLite stores a separate order for every automation. Switching the selector replaces the module set. Manual modules provide a hardware-free dry run and a confirmed live run. Disabling an automation pauses its automatic triggers but does not block an explicit authenticated manual run.
 
 ### Triggers
@@ -186,7 +190,7 @@ Controls that must remain:
 ## Windows workflows
 
 - `Install VisionGate.bat`: finds or installs Python 3.11 with Winget, creates `.venv`, selects official CPU/CUDA PyTorch wheels, installs dependencies/models, compiles entry points, creates a shortcut, and launches.
-- `Launch VisionGate.bat`: repairs missing dependencies, creates file-only login if absent, avoids duplicate port-83 servers, configures private firewall access, and opens the correct address.
+- `Launch VisionGate.bat`: pins runtime data to this installation's `data` folder, repairs missing dependencies, creates file-only login if absent, reuses a current port-83 server, safely reloads a stale VisionGate process after source changes, configures private firewall access, and opens the correct address. Startup prints the resolved database path.
 - `Configure Login.bat`: changes username/password locally with masked input; restart required.
 - `Configure Online Access.bat`: configures direct HTTP port 83 and the public trusted host.
 - `Update VisionGate.bat`: creates a timestamped runtime backup, performs a fast-forward Git update when applicable, repairs dependencies/backend, and preserves all runtime data.
@@ -206,7 +210,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\browser_ui_check.ps1
 
 GitHub Actions runs the Python dependency, test, compilation, and installer-plan gates on Windows with the official CPU PyTorch wheels. Some tests deliberately produce relay, HTTP, or timeout warnings while proving failure handling.
 
-Latest local release evidence on 2026-08-23: all `160` tests passed; dependency, launcher, compilation, and JavaScript checks passed; direct HTTP port `83` started successfully; real YOLO + MobileNet inference passed with CUDA disabled and on an NVIDIA GTX 1060; authenticated Edge runs verified automation switching, module removal/restoration/reordering persistence, a confirmed manual run, camera deletion, and zero overflow with `44px` controls at `320px`; the desktop and phone automation editors also passed their canvas/card checks.
+Latest local release evidence on 2026-08-23: all `164` tests passed; dependency, launcher, compilation, and JavaScript checks passed; a hardware-free copy of the saved live configuration completed `authorized approval -> automation 1 -> channel 1 action`; direct HTTP port `83` started successfully; real YOLO + MobileNet inference passed with CUDA disabled and on an NVIDIA GTX 1060; authenticated Edge runs verified automation switching, module removal/restoration/reordering persistence, a confirmed manual run, camera deletion, and zero overflow with `44px` controls at `320px`; the desktop and phone automation editors also passed their canvas/card checks.
 
 ## Known constraints
 

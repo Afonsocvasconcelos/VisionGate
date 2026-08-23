@@ -65,6 +65,7 @@ from enrollment import EnrollmentManager
 
 
 ROOT = Path(__file__).resolve().parent
+SOURCE_VERSION = str(max(path.stat().st_mtime_ns for path in ROOT.glob("*.py")))
 load_dotenv(ROOT / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("visiongate")
@@ -81,6 +82,7 @@ def _number(name: str, default: float, minimum: float, maximum: float) -> float:
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", ROOT / "data")).resolve()
+DATA_LOCATION = "local" if DATA_DIR == (ROOT / "data").resolve() else "external"
 DEFAULT_SETTINGS = {
     "app_name": "VisionGate",
     "brand_palette": "teal",
@@ -720,6 +722,28 @@ def detection_caption(track: dict) -> str:
     return f'{track.get("match") or track["label"]} · {track["confidence"]:.0%}'
 
 
+def confirm_authorized_tracks(
+    gate: AccessGate,
+    tracks: list[dict],
+    matches: dict[int, tuple[Match, str, float]],
+    confirmed: dict[int, Match],
+    now: float,
+) -> list[tuple[int, Match]]:
+    approved = []
+    for track in tracks:
+        track_id = track["id"]
+        current = (
+            matches.get(track_id)
+            if reid_eligible(track["label"], track["box"])
+            else None
+        )
+        match = current[0] if current else None
+        if gate.observe(track_id, match.profile.id if match else None, now):
+            confirmed[track_id] = match
+            approved.append((track_id, match))
+    return approved
+
+
 def authorized_presence_events(
     previous: dict[int, Match], current: dict[int, Match], camera: Camera
 ) -> list[tuple[str, dict]]:
@@ -899,7 +923,10 @@ class VisionSystem:
             )
 
     def _publish_scene(
-        self, authorized_tracks: dict[int, Match], labels: set[str]
+        self,
+        authorized_tracks: dict[int, Match],
+        labels: set[str],
+        approved_now: dict[int, Match] | None = None,
     ) -> None:
         with self.state_lock:
             previous_tracks = dict(self._authorized_tracks)
@@ -910,7 +937,14 @@ class VisionSystem:
         for kind, payload in authorized_presence_events(
             previous_tracks, authorized_tracks, self.camera
         ):
-            self._emit(kind, payload)
+            if approved_now is None or not payload["present"]:
+                self._emit(kind, payload)
+        if approved_now is not None:
+            for track_id, match in sorted(approved_now.items()):
+                kind, payload = authorized_presence_events(
+                    {}, {track_id: match}, self.camera
+                )[0]
+                self._emit(kind, payload)
         for kind, payload in object_class_events(previous_labels, labels, self.camera):
             self._emit(kind, payload)
 
@@ -1129,13 +1163,13 @@ class VisionSystem:
                             )
                         else:
                             matches.pop(track_id, None)
-                        if gate.observe(
-                            track_id,
-                            match.profile.id if match else None,
-                            time.monotonic(),
-                        ):
-                            confirmed[track_id] = match
-                            self.report(f"Access approved for {match.profile.name}")
+                approved_now = dict(
+                    confirm_authorized_tracks(
+                        gate, tracks, matches, confirmed, time.monotonic()
+                    )
+                )
+                for approved in approved_now.values():
+                    self.report(f"Access approved for {approved.profile.name}")
                 active_ids = {track["id"] for track in tracks}
                 gate.retain(active_ids)
                 for stale_id in set(embeddings) - active_ids:
@@ -1152,7 +1186,11 @@ class VisionSystem:
                     track["embedding"] = embeddings.get(track["id"])
                     if matched := matches.get(track["id"]):
                         track["match"], track["similarity"] = matched[1], matched[2]
-                self._publish_scene(confirmed, {track["label"] for track in tracks})
+                self._publish_scene(
+                    confirmed,
+                    {track["label"] for track in tracks},
+                    approved_now,
+                )
                 annotated = frame.copy()
                 for track in tracks:
                     x1, y1, x2, y2 = track["box"]
@@ -1256,7 +1294,14 @@ class VisionManager:
 
     def emit_event(self, kind: str, payload: dict) -> None:
         try:
-            self.automation.emit(kind, payload)
+            runs = self.automation.emit(kind, payload)
+            if runs:
+                log.info("Automation event %s started %d run(s)", kind, len(runs))
+            elif kind == "trigger.camera.authorized_presence" and payload.get("present"):
+                log.warning(
+                    "Automation event %s started 0 runs; no enabled activator matched",
+                    kind,
+                )
         except Exception:
             log.exception("Automation event failed: %s", kind)
 
@@ -1659,6 +1704,7 @@ class ConfirmedAutomationRun(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    log.info("Using database: %s", DATABASE.path)
     MANAGER.start()
     yield
     MANAGER.shutdown()
@@ -1853,7 +1899,12 @@ def logout(request: Request):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {
+        "ok": True,
+        "app": "VisionGate",
+        "source_version": SOURCE_VERSION,
+        "data_location": DATA_LOCATION,
+    }
 
 
 @app.get("/")
