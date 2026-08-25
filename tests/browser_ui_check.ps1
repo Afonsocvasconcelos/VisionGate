@@ -121,7 +121,7 @@ fetch('/api/auth/login', {
   const graph = (name, trigger) => ({
     schema_version:1,name,enabled:true,revision:1,max_concurrent_runs:1,
     nodes:[trigger,{id:'camera',kind:'action.camera.disable',config:{camera_id:camera.id},position:{x:380,y:120}}],
-    edges:[{id:'edge',from:trigger.id,to:'camera',from_port:'right',to_port:'left',outcome:'success',steps:[]}]
+    edges:[{id:'edge',from:trigger.id,to:'camera',from_port:'right',to_port:'left',outcome:'success'}]
   });
   const eventGraph = graph('Camera events',{id:'event',kind:'trigger.camera.connection',config:{camera_id:camera.id,online:true},position:{x:80,y:120}});
   const manualGraph = graph('Manual camera',{id:'manual',kind:'trigger.manual',config:{},position:{x:80,y:120}});
@@ -141,6 +141,14 @@ fetch('/api/auth/login', {
     $dashboard = Evaluate @'
 (async () => {
   const select = document.getElementById('dashboardAutomation');
+  const waitForModules = async expected => {
+    for (let attempt=0; attempt<30; attempt++) {
+      const modules = (await (await fetch('/api/dashboard/automation')).json()).modules;
+      if (JSON.stringify(modules) === JSON.stringify(expected)) return modules;
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+    throw Error(`dashboard modules were not saved: ${expected}`);
+  };
   const beforeManual = !!document.querySelector('.manual-module');
   select.value = [...select.options].find(option => option.textContent === 'Manual camera').value;
   select.dispatchEvent(new Event('change', {bubbles:true}));
@@ -151,13 +159,16 @@ fetch('/api/auth/login', {
   [...document.querySelectorAll('.module-edit-controls button')].find(button=>button.title.startsWith('Remove Browser camera')).click();
   for (let attempt=0; attempt<20 && document.querySelectorAll('[data-module-id]').length!==1; attempt++) await new Promise(resolve=>setTimeout(resolve,50));
   const afterRemove = document.querySelectorAll('[data-module-id]').length;
+  await waitForModules(['manual']);
   document.getElementById('addDashboardModule').click();
   for (let attempt=0; attempt<20 && document.querySelectorAll('[data-module-id]').length!==2; attempt++) await new Promise(resolve=>setTimeout(resolve,50));
   const afterAdd = document.querySelectorAll('[data-module-id]').length;
+  const added = [...document.querySelectorAll('[data-module-id]')].map(item=>item.dataset.moduleId);
+  await waitForModules(added);
   document.querySelector('[data-module-id="manual"] .module-edit-controls button[title="Move later"]').click();
   for (let attempt=0; attempt<20 && document.querySelector('[data-module-id]')?.dataset.moduleId==='manual'; attempt++) await new Promise(resolve=>setTimeout(resolve,50));
   const reordered = [...document.querySelectorAll('[data-module-id]')].map(item=>item.dataset.moduleId);
-  const persisted = (await (await fetch('/api/dashboard/automation')).json()).modules;
+  const persisted = await waitForModules(reordered);
   return {
     width:innerWidth,
     scroll:document.documentElement.scrollWidth,
@@ -206,18 +217,35 @@ fetch('/api/auth/login', {
   window.dispatchEvent(new PointerEvent('pointermove', {bubbles:true, clientX:680, clientY:390}));
   window.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, clientX:680, clientY:390}));
   const moved = document.querySelector(`[data-node-id='${id}']`).offsetLeft;
+  const edge = document.querySelector('.graph-edge');
+  const lineThin = Number.parseFloat(getComputedStyle(edge).strokeWidth) === 2;
   document.querySelector('.graph-edge-hit').dispatchEvent(new MouseEvent('click', {bubbles:true}));
   const inspector = document.getElementById('nodeInspector').innerText;
-  [...document.querySelectorAll('#nodeInspector button')].find(button => button.textContent.includes('Wait')).click();
+  const marker = document.getElementById('graphArrow');
+  const arrowVisible = edge.getAttribute('marker-end') === 'url(#graphArrow)' && marker?.getAttribute('markerWidth') === '10' && marker?.getAttribute('markerUnits') === 'userSpaceOnUse';
+  const paletteOnly = [...document.querySelectorAll('.node-template strong')].map(item => item.textContent).join('|') === 'Trigger|Condition|Action|Step';
+  const waitTemplate = document.querySelector('.node-template.step');
+  const waitTransfer = new DataTransfer();
+  waitTemplate.dispatchEvent(new DragEvent('dragstart', {bubbles:true, dataTransfer:waitTransfer}));
+  canvas.dispatchEvent(new DragEvent('dragover', {bubbles:true, cancelable:true, clientX:820, clientY:350, dataTransfer:waitTransfer}));
+  canvas.dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, clientX:820, clientY:350, dataTransfer:waitTransfer}));
   const stepVisible = document.getElementById('nodeInspector').innerText.includes('Seconds');
+  const behavior = document.querySelector('#nodeInspector select');
+  behavior.value = 'step.hold_true';
+  behavior.dispatchEvent(new Event('change', {bubbles:true}));
+  const holdVisible = document.getElementById('nodeInspector').innerText.includes('Hold true') && document.getElementById('nodeInspector').innerText.includes('Unit');
   const edgesBefore = document.querySelectorAll('.graph-edge').length;
   document.querySelector('.graph-node.trigger .port-right.occupied').click();
   return {
     nodes: document.querySelectorAll('.graph-node').length,
     conditionPorts: document.querySelectorAll('.graph-node.condition .node-port').length,
     moved: moved > before,
-    edgeSelectable: inspector.includes('Transition steps'),
+    edgeSelectable: inspector.includes('Follows the arrow direction'),
+    arrowVisible,
+    lineThin,
+    paletteOnly,
     stepVisible,
+    holdVisible,
     edgesBefore,
     edgesAfter: document.querySelectorAll('.graph-edge').length,
     noPrimary: !document.body.innerText.includes('Primary Door')
@@ -246,7 +274,7 @@ fetch('/api/auth/login', {
 
     $result = @{dashboard=$dashboard.result.value; manualRun=$manualRun.result.value; desktop=$desktop.result.value; mobile=$mobile.result.value; dashboardMobile=$dashboardMobile.result.value}
     if (-not $result.dashboard.hasPicker -or -not $result.dashboard.hasTrash -or -not $result.dashboard.noPrimary -or $result.dashboard.beforeManual -or -not ($result.dashboard.selectedModules -contains 'manual') -or $result.dashboard.editControls -ne 2 -or $result.dashboard.afterRemove -ne 1 -or $result.dashboard.afterAdd -ne 2 -or $result.dashboard.reordered[1] -ne 'manual' -or $result.dashboard.persisted[1] -ne 'manual' -or -not $result.dashboard.runButton -or -not $result.manualRun.Contains('completed')) { throw "Dashboard browser check failed: $($result | ConvertTo-Json -Compress -Depth 8)" }
-    if ($result.desktop.conditionPorts -ne 4 -or -not $result.desktop.moved -or -not $result.desktop.edgeSelectable -or -not $result.desktop.stepVisible -or $result.desktop.edgesBefore -ne 1 -or $result.desktop.edgesAfter -ne 0 -or -not $result.desktop.noPrimary) { throw "Desktop editor browser check failed" }
+    if ($result.desktop.conditionPorts -ne 4 -or -not $result.desktop.moved -or -not $result.desktop.edgeSelectable -or -not $result.desktop.arrowVisible -or -not $result.desktop.lineThin -or -not $result.desktop.paletteOnly -or -not $result.desktop.stepVisible -or -not $result.desktop.holdVisible -or $result.desktop.edgesBefore -ne 1 -or $result.desktop.edgesAfter -ne 0 -or -not $result.desktop.noPrimary) { throw "Desktop editor browser check failed: $($result.desktop | ConvertTo-Json -Compress -Depth 8)" }
     if ($result.mobile.scroll -gt $result.mobile.width -or $result.mobile.nodes -lt 2 -or $result.mobile.minButton -lt 44) { throw "Mobile editor browser check failed" }
     if ($result.dashboardMobile.scroll -gt $result.dashboardMobile.width -or $result.dashboardMobile.modules -lt 2 -or -not $result.dashboardMobile.manual -or $result.dashboardMobile.minButton -lt 44) { throw "Mobile dashboard browser check failed" }
     $result | ConvertTo-Json -Compress -Depth 8

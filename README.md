@@ -2,8 +2,6 @@
 
 VisionGate is a Windows-first FastAPI application that reads multiple RTSP cameras, tracks people, cars, motorcycles, and bicycles with YOLO11 + ByteTrack, compares multi-sample MobileNet appearance descriptors, and runs visual automations for eWeLink devices.
 
-Maintainers should start with [docs/PROJECT_CONTEXT.md](docs/PROJECT_CONTEXT.md) for the complete product contract, architecture, user decisions, persistence model, workflows, and constraints.
-
 Each enabled camera has its own independent detector and tracker. Cameras share authorized identities and can control any imported device through editable automations. Each automation keeps its own canvas layout, and the dashboard remembers which layout is selected. Enrollment recordings are temporary and are deleted after save, cancel, expiry, or restart.
 
 SQLite stores cameras, settings, credentials, identity samples, imported eWeLink devices, automations, and recent run/event history in `data/whitelist.db`. A match must agree on object class, exceed the configured similarity threshold, remain clearly better than lookalike profiles, repeat across observations, and pass the opening cooldown.
@@ -42,7 +40,7 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 5. VisionGate saves every device returned by the account. A later sign-in refreshes that inventory and marks removed devices unavailable.
 6. Use the device card's **Pulse** control on channels `1` and `2` while the door can be observed safely.
 7. In **Automations**, drag a Trigger and Action to the canvas. Set the trigger to authorized presence `true`, then set the action to the 4CH Pro R2, channel `1`, and a short pulse.
-8. For closing, connect authorized presence `false` through a wait and an authorized-count condition to a channel `2` pulse. Physical obstruction protection and an independent timeout remain required.
+8. For closing, connect authorized presence `false` through a **Wait** block and an authorized-count condition to a channel `2` pulse. Physical obstruction protection and an independent timeout remain required.
 
 VisionGate refreshes the persistent eWeLink inventory once per minute. The 4CH Pro R2's momentary relays cannot sense physical door position; add a contact sensor if physical open/closed state is required.
 
@@ -58,7 +56,7 @@ The console prints the current `http://192.168.x.x:83` address for phones and ot
 
 Choose an automation on the responsive dashboard to show only the cameras, eWeLink devices, and manual control used by that automation. Choose **Customize** to remove, restore, drag, or move those controls; the order is saved separately for every automation. Every activator is a start node: its matching event follows the same execution path as Manual. A manual activator adds **Test safely** (no hardware changes) and a confirmed **Run now**. Disabling an automation pauses automatic triggers; explicit manual runs remain available.
 
-The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Authorized identities remain available beside the selected automation; diagnostics and routine history stay out of the everyday screen. The applied usability and accessibility decisions are documented in [docs/UX_RESEARCH.md](docs/UX_RESEARCH.md).
+The separate **Automations** page provides a desktop node canvas and an equivalent phone card editor. Authorized identities remain available beside the selected automation; diagnostics and routine history stay out of the everyday screen.
 
 Add a **Schedule activator** to run an automation at a local time every day or on selected weekdays, or repeat it every chosen number of minutes, hours, or days. Each schedule saves its time zone and shows the next run.
 

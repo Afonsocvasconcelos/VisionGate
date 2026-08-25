@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 info.md
+docs/
 data/
 backups/
 *.db

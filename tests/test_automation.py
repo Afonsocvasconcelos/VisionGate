@@ -106,12 +106,9 @@ class DatabaseMigrationTests(unittest.TestCase):
             automation = database.automations()[0]
             self.assertTrue(automation.enabled)
             wait = next(
-                step
-                for edge in automation.graph["edges"]
-                for step in edge["steps"]
-                if step["type"] == "wait"
+                node for node in automation.graph["nodes"] if node["kind"] == "step.wait"
             )
-            self.assertEqual(wait["seconds"], 12)
+            self.assertEqual(wait["config"]["seconds"], 12)
 
     def test_legacy_install_without_a_device_does_not_create_an_invalid_automation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,6 +308,129 @@ class EWeLinkInventoryPersistenceTests(unittest.TestCase):
 
 
 class AutomationGraphTests(unittest.TestCase):
+    def test_wait_and_variable_steps_are_nodes_and_connections_are_plain(self):
+        graph = self.graph(
+            [
+                {"id": "start", "kind": "trigger.manual", "config": {}},
+                {"id": "wait", "kind": "step.wait", "config": {"seconds": 3}},
+                {
+                    "id": "remember",
+                    "kind": "step.set_variable",
+                    "config": {"name": "ready", "value": True},
+                },
+                {"id": "log", "kind": "action.log", "config": {"message": "Ready"}},
+            ],
+            [
+                {"id": "one", "from": "start", "to": "wait", "outcome": "success"},
+                {"id": "two", "from": "wait", "to": "remember", "outcome": "success"},
+                {"id": "three", "from": "remember", "to": "log", "outcome": "success"},
+            ],
+        )
+
+        validated = validate_graph(graph)
+
+        self.assertTrue(all("steps" not in edge for edge in validated["edges"]))
+        self.assertEqual(validated["nodes"][1]["config"]["seconds"], 3)
+
+    def test_hold_true_step_accepts_seconds_or_minutes(self):
+        for value, unit in ((2.5, "seconds"), (3, "minutes")):
+            graph = self.graph(
+                [
+                    {"id": "start", "kind": "trigger.manual", "config": {}},
+                    {
+                        "id": "hold",
+                        "kind": "step.hold_true",
+                        "config": {"value": value, "unit": unit},
+                    },
+                ],
+                [{"id": "hold", "from": "start", "to": "hold", "outcome": "success"}],
+            )
+
+            self.assertEqual(validate_graph(graph)["nodes"][1]["config"]["unit"], unit)
+
+        graph["nodes"][1]["config"]["unit"] = "hours"
+        with self.assertRaisesRegex(GraphValidationError, "hold true"):
+            validate_graph(graph)
+
+    def test_legacy_edge_steps_upgrade_to_ordered_step_nodes(self):
+        legacy = self.graph(
+            [
+                {
+                    "id": "start",
+                    "kind": "trigger.manual",
+                    "config": {},
+                    "position": {"x": 0, "y": 0},
+                },
+                {
+                    "id": "log",
+                    "kind": "action.log",
+                    "config": {"message": "Ready"},
+                    "position": {"x": 600, "y": 0},
+                },
+            ],
+            [
+                {
+                    "id": "legacy",
+                    "from": "start",
+                    "to": "log",
+                    "outcome": "success",
+                    "steps": [
+                        {"type": "wait", "seconds": 4},
+                        {"type": "set_variable", "name": "ready", "value": True},
+                    ],
+                }
+            ],
+        )
+
+        upgraded, changed = upgrade_automation_graph(legacy, {})
+        validated = validate_graph(upgraded)
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [node["kind"] for node in validated["nodes"][-2:]],
+            ["step.wait", "step.set_variable"],
+        )
+        self.assertEqual(len(validated["edges"]), 3)
+        self.assertTrue(all("steps" not in edge for edge in validated["edges"]))
+
+    def test_malformed_legacy_step_graph_returns_validation_errors(self):
+        graph = self.graph(
+            [
+                {"id": [], "kind": "trigger.manual", "config": {}, "position": "invalid"},
+                {"id": "log", "kind": "action.log", "config": {"message": "Ready"}},
+            ],
+            [
+                {
+                    "id": "legacy",
+                    "from": [],
+                    "to": "log",
+                    "outcome": "success",
+                    "steps": [{"type": "wait", "seconds": 4}],
+                }
+            ],
+        )
+
+        with self.assertRaises(GraphValidationError):
+            validate_graph(graph)
+
+        graph = self.graph(
+            [
+                {"id": "start", "kind": "trigger.manual", "config": {}},
+                {"id": "log", "kind": "action.log", "config": {"message": "Ready"}},
+            ],
+            [
+                {
+                    "id": "legacy",
+                    "from": "start",
+                    "to": "log",
+                    "outcome": "success",
+                    "steps": {},
+                }
+            ],
+        )
+        with self.assertRaises(GraphValidationError):
+            validate_graph(graph)
+
     def test_generalized_boolean_triggers_typed_conditions_and_ports_are_saved(self):
         graph = self.graph(
             [
@@ -346,7 +466,7 @@ class AutomationGraphTests(unittest.TestCase):
         validated = validate_graph(graph, {"camera_ids": {3}})
 
         self.assertEqual(validated["edges"][0]["from_port"], "bottom")
-        self.assertEqual(validated["edges"][0]["to_port"], "top")
+        self.assertEqual(validated["edges"][-1]["to_port"], "top")
         self.assertEqual(validated["nodes"][1]["config"]["value_type"], "boolean")
 
         graph["nodes"][1]["config"]["value_type"] = "string"
@@ -1023,6 +1143,172 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
             self.assertEqual(outcomes["condition"], "true")
             self.assertEqual(outcomes["open"], "failure")
 
+    def test_runtime_executes_wait_and_variable_step_nodes(self):
+        graph = self.manual_graph()
+        graph["nodes"] = [
+            graph["nodes"][0],
+            {"id": "wait", "kind": "step.wait", "config": {"seconds": 0.02}},
+            {
+                "id": "remember",
+                "kind": "step.set_variable",
+                "config": {"name": "ready", "value": True},
+            },
+            graph["nodes"][1],
+        ]
+        graph["edges"] = [
+            {"id": "one", "from": "start", "to": "wait", "outcome": "success"},
+            {"id": "two", "from": "wait", "to": "remember", "outcome": "success"},
+            {"id": "three", "from": "remember", "to": "action", "outcome": "success"},
+        ]
+        observed = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "steps.db")
+            automation = database.create_automation("Steps", graph, enabled=True)
+            engine = AutomationEngine(
+                database,
+                lambda _kind, _config, context: observed.append(context["variables"]["ready"]) or {},
+            )
+            started = time.monotonic()
+
+            run = engine.run_automation(automation.id, wait=True)
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(observed, [True])
+        self.assertGreaterEqual(time.monotonic() - started, 0.018)
+
+    def test_hold_true_passes_only_while_the_latest_condition_stays_true(self):
+        graph = self.manual_graph()
+        graph["nodes"] = [
+            graph["nodes"][0],
+            {
+                "id": "condition",
+                "kind": "condition.compare",
+                "config": {
+                    "field": "state.authorized_count",
+                    "camera_id": "*",
+                    "operator": "equals",
+                    "value": 0,
+                    "value_type": "number",
+                },
+            },
+            {
+                "id": "hold",
+                "kind": "step.hold_true",
+                "config": {"value": 0.08, "unit": "seconds"},
+            },
+            graph["nodes"][1],
+        ]
+        graph["edges"] = [
+            {"id": "one", "from": "start", "to": "condition", "outcome": "success"},
+            {"id": "two", "from": "condition", "to": "hold", "outcome": "true"},
+            {"id": "three", "from": "hold", "to": "action", "outcome": "success"},
+        ]
+        state = {"authorized_count": 0}
+        actions = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "hold-condition.db")
+            automation = database.create_automation("Hold condition", graph, enabled=True)
+            engine = AutomationEngine(
+                database,
+                lambda kind, *_args: actions.append(kind) or {},
+                lambda field, *_args: state["authorized_count"] if field == "state.authorized_count" else None,
+            )
+
+            stopped = engine.run_automation(automation.id)
+            time.sleep(0.02)
+            state["authorized_count"] = 1
+            self.assertTrue(engine.wait_for_idle(1))
+            stopped = database.automation_run(stopped.id)
+
+            state["authorized_count"] = 0
+            passed = engine.run_automation(automation.id, wait=True)
+
+        self.assertEqual(actions, ["action.log"])
+        self.assertEqual(
+            next(item for item in stopped.result["nodes"] if item["id"] == "hold")["outcome"],
+            "stopped",
+        )
+        self.assertEqual(
+            next(item for item in passed.result["nodes"] if item["id"] == "hold")["outcome"],
+            "success",
+        )
+
+    def test_hold_true_rechecks_a_presence_trigger(self):
+        graph = self.manual_graph()
+        graph["nodes"] = [
+            {
+                "id": "start",
+                "kind": "trigger.camera.authorized_presence",
+                "config": {"camera_id": "*", "present": True},
+            },
+            {
+                "id": "hold",
+                "kind": "step.hold_true",
+                "config": {"value": 0.08, "unit": "seconds"},
+            },
+            graph["nodes"][1],
+        ]
+        graph["edges"] = [
+            {"id": "one", "from": "start", "to": "hold", "outcome": "success"},
+            {"id": "two", "from": "hold", "to": "action", "outcome": "success"},
+        ]
+        state = {"authorized_count": 1}
+        actions = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "hold-trigger.db")
+            database.create_automation("Hold trigger", graph, enabled=True)
+            engine = AutomationEngine(
+                database,
+                lambda kind, *_args: actions.append(kind) or {},
+                lambda field, *_args: state["authorized_count"] if field == "state.authorized_count" else None,
+            )
+
+            engine.emit(
+                "trigger.camera.authorized_presence",
+                {"camera_id": 1, "present": True},
+            )
+            time.sleep(0.02)
+            state["authorized_count"] = 0
+            self.assertTrue(engine.wait_for_idle(1))
+
+            state["authorized_count"] = 1
+            engine.emit(
+                "trigger.camera.authorized_presence",
+                {"camera_id": 1, "present": True},
+            )
+            self.assertTrue(engine.wait_for_idle(1))
+
+        self.assertEqual(actions, ["action.log"])
+
+    def test_hold_true_never_treats_unknown_presence_as_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AutomationEngine(
+                Database(Path(directory) / "hold-unknown.db"),
+                lambda *_args: {},
+                lambda *_args: None,
+            )
+            context = {"event": {}, "variables": {}}
+
+            for kind, config in (
+                (
+                    "trigger.camera.authorized_presence",
+                    {"camera_id": "*", "present": False},
+                ),
+                (
+                    "trigger.camera.class_presence",
+                    {"camera_id": "*", "label": "person", "present": False},
+                ),
+            ):
+                self.assertFalse(
+                    engine._predicate_holds(
+                        {"kind": kind, "config": config, "outcome": "success"},
+                        context,
+                    )
+                )
+
     def test_dry_run_never_calls_the_hardware_action_handler(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "dry.db")
@@ -1144,8 +1430,9 @@ class AutomationPersistenceAndRuntimeTests(unittest.TestCase):
         close_edges = [edge for edge in graph["edges"] if edge["to"] == "close-door"]
 
         self.assertEqual(close_edges[0]["outcome"], "true")
-        wait_edge = next(edge for edge in graph["edges"] if edge["to"] == "still-away")
-        self.assertEqual(wait_edge["steps"], [{"type": "wait", "seconds": 7}])
+        wait = next(node for node in graph["nodes"] if node["kind"] == "step.wait")
+        self.assertEqual(wait["config"]["seconds"], 7)
+        self.assertTrue(any(edge["from"] == wait["id"] and edge["to"] == "still-away" for edge in graph["edges"]))
         condition = next(node for node in graph["nodes"] if node["id"] == "still-away")
         self.assertEqual(condition["config"]["camera_id"], "*")
 

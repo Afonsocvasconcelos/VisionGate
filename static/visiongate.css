@@ -533,6 +533,7 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
 }
 .node-template.trigger { border-left-color: #3478a8; }
 .node-template.condition { border-left-color: #a66a1c; }
+.node-template.step { border-left-color: #7c5a9c; }
 .node-template span { color: var(--muted); font-size: 11px; }
 .automation-list { display: grid; gap: 5px; }
 .automation-row {
@@ -622,12 +623,12 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
 .graph-edge {
   fill: none;
   stroke: #94a3ad;
-  stroke-width: 3;
+  stroke-width: 2;
   pointer-events: none;
 }
 .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 18; pointer-events: stroke; cursor: pointer; }
 .graph-edge:hover,
-.graph-edge.selected { stroke: var(--teal); stroke-width: 5; }
+.graph-edge.selected { stroke: var(--teal); stroke-width: 3; }
 .graph-edge.invalid { stroke: var(--danger); stroke-dasharray: 7 5; }
 .edge-label {
   fill: #53616d;
@@ -636,16 +637,6 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
   text-anchor: middle;
   pointer-events: none;
 }
-.edge-chip {
-  pointer-events: all;
-  cursor: pointer;
-  outline: none;
-}
-.edge-chip-bg { fill: white; stroke: var(--line-strong); stroke-width: 1px; }
-.edge-chip:hover .edge-chip-bg,
-.edge-chip:focus-visible .edge-chip-bg,
-.edge-chip.selected .edge-chip-bg { fill: var(--teal-soft); stroke: var(--teal); stroke-width: 2px; }
-.edge-chip.invalid .edge-chip-bg { fill: var(--danger-soft); stroke: var(--danger); stroke-width: 2px; }
 .graph-node {
   position: absolute;
   width: 220px;
@@ -661,6 +652,14 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
 .graph-node:active { cursor: grabbing; }
 .graph-node.trigger { border-top: 5px solid #3478a8; }
 .graph-node.action { border-top: 5px solid var(--teal); }
+.graph-node.step {
+  width: 140px;
+  min-height: 76px;
+  padding: 10px 12px;
+  border-color: #9a83ad;
+  border-radius: 24px;
+}
+.graph-node.step .node-port { top: 26px; }
 .graph-node.condition {
   isolation: isolate;
   padding: 19px 45px;
@@ -754,7 +753,6 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
 .inspector-head h2 { max-width: 190px; font-size: 16px; }
 .inspector-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-top: 15px; }
 .inspector-form > label,
-.edge-step > label,
 .scalar-value > label { display: grid; gap: 5px; color: #43515e; font-size: 11px; font-weight: 650; }
 .inspector-form .wide { grid-column: 1 / -1; }
 .inspector-form input,
@@ -764,19 +762,6 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
 .weekday-field label { display: grid; min-height: var(--tap); gap: 3px; color: var(--muted); font-size: 10px; text-align: center; place-items: center; }
 .weekday-field input { width: 18px; min-height: 18px; margin: auto; }
 .schedule-preview { margin: 0; padding: 9px; border-radius: 8px; background: var(--teal-soft); color: var(--teal-dark); font-size: 11px; }
-.edge-step-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.edge-step-head > div { display: flex; gap: 4px; }
-.edge-step {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: 1fr auto;
-  gap: 9px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: #f8f9fa;
-}
-.step-controls { display: flex; gap: 3px; }
 .scalar-value { display: grid; grid-column: 1 / -1; grid-template-columns: 1fr 1fr; gap: 8px; }
 .mobile-graph { display: none; }
 .run-history { display: grid; gap: 8px; }
@@ -834,6 +819,7 @@ summary { min-height: var(--tap); padding: 11px 0; color: var(--teal-dark); curs
   }
   .mobile-node.trigger { border-left-color: #3478a8; }
   .mobile-node.condition { border-left-color: #a66a1c; }
+  .mobile-node.step { border-left-color: #7c5a9c; }
   .mobile-node.selected { box-shadow: 0 0 0 3px rgba(8, 124, 113, .14); }
   .mobile-node > strong { font-size: 13px; }
   .mobile-node > p { margin: 0; color: var(--muted); font-size: 11px; }

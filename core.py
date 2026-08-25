@@ -148,7 +148,7 @@ class AutomationRun:
 
 
 class Database:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: str | Path):
         self.path = Path(path)

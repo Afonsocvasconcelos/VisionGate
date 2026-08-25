@@ -9,6 +9,9 @@ const NODE_TYPES = [
   ["Triggers", "trigger.ewelink.property_changed", "Device property changed"],
   ["Triggers", "trigger.ewelink.connection", "Device connection"],
   ["Conditions", "condition.compare", "Compare a value"],
+  ["Steps", "step.wait", "Wait"],
+  ["Steps", "step.hold_true", "Hold true"],
+  ["Steps", "step.set_variable", "Set variable"],
   ["Actions", "action.ewelink.switch", "Set device channel"],
   ["Actions", "action.ewelink.button", "Pulse device channel"],
   ["Actions", "action.ewelink.light", "Control light"],
@@ -24,6 +27,7 @@ const NODE_TYPES = [
 const TYPE_LABELS = Object.fromEntries(NODE_TYPES.map(([, kind, label]) => [kind, label]));
 const TRIGGERS = new Set(NODE_TYPES.filter(([group]) => group === "Triggers").map(([, kind]) => kind));
 const ACTIONS = new Set(NODE_TYPES.filter(([group]) => group === "Actions").map(([, kind]) => kind));
+const STEPS = new Set(NODE_TYPES.filter(([group]) => group === "Steps").map(([, kind]) => kind));
 const CAMERA_KINDS = new Set(NODE_TYPES.filter(([, kind]) => kind.includes(".camera.")).map(([, kind]) => kind));
 const DEVICE_KINDS = new Set(NODE_TYPES.filter(([, kind]) => kind.includes(".ewelink.")).map(([, kind]) => kind));
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -105,6 +109,9 @@ function defaultConfig(kind) {
     return config;
   }
   if (kind === "condition.compare") return {field: "event.authorized", operator: "equals", value: true, value_type: "boolean"};
+  if (kind === "step.wait") return {seconds: 10};
+  if (kind === "step.hold_true") return {value: 10, unit: "seconds"};
+  if (kind === "step.set_variable") return {name: "value", value: true};
   if (kind === "action.log") return {message: "Automation ran"};
   return {};
 }
@@ -125,7 +132,7 @@ function starterGraph(name = "New automation") {
 }
 
 function finishStarter(document) {
-  document.edges.push({id: newId("edge"), from: document.nodes[0].id, to: document.nodes[1].id, from_port: "right", to_port: "left", outcome: "success", steps: []});
+  document.edges.push({id: newId("edge"), from: document.nodes[0].id, to: document.nodes[1].id, from_port: "right", to_port: "left", outcome: "success"});
   return document;
 }
 
@@ -191,8 +198,11 @@ function applyView() {
 function nodeClass(kind) {
   if (TRIGGERS.has(kind)) return "trigger";
   if (kind === "condition.compare") return "condition";
+  if (STEPS.has(kind)) return "step";
   return "action";
 }
+
+function nodeSize(kind) { return STEPS.has(kind) ? {width: 140, height: 76} : {width: 220, height: 110}; }
 
 function nodeSummary(node) {
   const c = node.config || {};
@@ -208,6 +218,9 @@ function nodeSummary(node) {
     return device?.name || "Choose device";
   }
   if (node.kind === "condition.compare") return `${c.field || "Choose field"} ${c.operator || ""} ${String(c.value ?? "")}`;
+  if (node.kind === "step.wait") return `${c.seconds ?? 0} seconds`;
+  if (node.kind === "step.hold_true") return `${c.value ?? 0} ${c.unit || "seconds"}`;
+  if (node.kind === "step.set_variable") return `${c.name || "value"} = ${String(c.value ?? "empty")}`;
   if (node.kind === "action.log") return c.message || "Log message";
   return "";
 }
@@ -250,7 +263,7 @@ function usePort(nodeId, port) {
     : "success";
   connectingFrom = null;
   $("connectHint").hidden = true;
-  change(() => graph.edges.push({id: newId("edge"), from: start.nodeId, to: nodeId, from_port: start.port, to_port: port, outcome, steps: []}));
+  change(() => graph.edges.push({id: newId("edge"), from: start.nodeId, to: nodeId, from_port: start.port, to_port: port, outcome}));
 }
 
 function createPort(node, port) {
@@ -327,33 +340,47 @@ function startNodeDrag(event, node) {
 }
 
 function edgeText(edge) {
-  const parts = [edge.outcome || "success"];
-  for (const step of edge.steps || []) {
-    parts.push(step.type === "wait" ? `wait ${step.seconds}s` : `set ${step.name}`);
-  }
-  return parts.join(" · ");
+  return {true: "True", false: "False", failure: "Failure"}[edge.outcome] || "Continue";
 }
 
 function drawConnections() {
   const svg = $("graphConnections");
   svg.replaceChildren();
   if (!graph) return;
+  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+  const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+  const arrow = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  marker.setAttribute("id", "graphArrow");
+  marker.setAttribute("viewBox", "0 0 10 10");
+  marker.setAttribute("refX", "9");
+  marker.setAttribute("refY", "5");
+  marker.setAttribute("markerUnits", "userSpaceOnUse");
+  marker.setAttribute("markerWidth", "10");
+  marker.setAttribute("markerHeight", "10");
+  marker.setAttribute("orient", "auto-start-reverse");
+  arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+  arrow.setAttribute("fill", "context-stroke");
+  marker.append(arrow); defs.append(marker); svg.append(defs);
   for (const edge of graph.edges) {
     const source = nodeById(edge.from);
     const target = nodeById(edge.to);
     if (!source || !target) continue;
-    const point = (node, port) => ({
-      top: [node.position.x + 110, node.position.y],
-      right: [node.position.x + 220, node.position.y + 55],
-      bottom: [node.position.x + 110, node.position.y + 110],
-      left: [node.position.x, node.position.y + 55],
-    }[port]);
+    const point = (node, port) => {
+      const {width, height} = nodeSize(node.kind);
+      return ({
+        top: [node.position.x + width / 2, node.position.y],
+        right: [node.position.x + width, node.position.y + height / 2],
+        bottom: [node.position.x + width / 2, node.position.y + height],
+        left: [node.position.x, node.position.y + height / 2],
+      }[port]);
+    };
     const tangent = {top: [0, -1], right: [1, 0], bottom: [0, 1], left: [-1, 0]};
     const [x1, y1] = point(source, edge.from_port || "right");
     const [x2, y2] = point(target, edge.to_port || "left");
     const bend = Math.max(65, Math.hypot(x2 - x1, y2 - y1) * .35);
     const [sx, sy] = tangent[edge.from_port || "right"], [tx, ty] = tangent[edge.to_port || "left"];
-    const pathData = `M ${x1} ${y1} C ${x1 + sx * bend} ${y1 + sy * bend}, ${x2 + tx * bend} ${y2 + ty * bend}, ${x2} ${y2}`;
+    const endX = x2 + tx * 6, endY = y2 + ty * 6;
+    const pathData = `M ${x1} ${y1} C ${x1 + sx * bend} ${y1 + sy * bend}, ${endX + tx * bend} ${endY + ty * bend}, ${endX} ${endY}`;
     const hit = document.createElementNS("http://www.w3.org/2000/svg", "path");
     hit.setAttribute("d", pathData);
     hit.setAttribute("class", "graph-edge-hit");
@@ -362,30 +389,18 @@ function drawConnections() {
     path.setAttribute("d", pathData);
     path.setAttribute("class", `graph-edge${selectedEdgeId === edge.id ? " selected" : ""}${invalidEdges.has(edge.id) ? " invalid" : ""}`);
     path.setAttribute("tabindex", "0");
+    path.setAttribute("marker-end", "url(#graphArrow)");
     path.onclick = event => { event.stopPropagation(); selectEdge(edge.id); };
     path.onkeydown = event => { if (event.key === "Enter") selectEdge(edge.id); };
-    const text = edgeText(edge);
-    const centerX = (x1 + x2) / 2, centerY = (y1 + y2) / 2 - 8;
-    const chip = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    const width = Math.max(58, text.length * 6.5 + 18);
-    chip.setAttribute("class", `edge-chip${selectedEdgeId === edge.id ? " selected" : ""}${invalidEdges.has(edge.id) ? " invalid" : ""}`);
-    chip.setAttribute("tabindex", "0");
-    background.setAttribute("class", "edge-chip-bg");
-    background.setAttribute("x", String(centerX - width / 2));
-    background.setAttribute("y", String(centerY - 16));
-    background.setAttribute("width", String(width));
-    background.setAttribute("height", "24");
-    background.setAttribute("rx", "7");
-    label.setAttribute("x", String(centerX));
-    label.setAttribute("y", String(centerY));
-    label.setAttribute("class", "edge-label");
-    label.textContent = text;
-    chip.onclick = event => { event.stopPropagation(); selectEdge(edge.id); };
-    chip.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectEdge(edge.id); } };
-    chip.append(background, label);
-    svg.append(hit, path, chip);
+    svg.append(hit, path);
+    if (edge.outcome && edge.outcome !== "success") {
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", String((x1 + endX) / 2));
+      label.setAttribute("y", String((y1 + endY) / 2 - 8));
+      label.setAttribute("class", "edge-label");
+      label.textContent = edgeText(edge);
+      svg.append(label);
+    }
   }
 }
 
@@ -439,7 +454,7 @@ function addNode(kind, afterId = null, position = null) {
   change(() => {
     graph.nodes.push(node);
     if (source) {
-      graph.edges.push({id: newId("edge"), from: source.id, to: node.id, from_port: "right", to_port: "left", outcome: source.kind === "condition.compare" ? "true" : "success", steps: []});
+      graph.edges.push({id: newId("edge"), from: source.id, to: node.id, from_port: "right", to_port: "left", outcome: source.kind === "condition.compare" ? "true" : "success"});
     }
     selectedNodeId = node.id;
     selectedEdgeId = null;
@@ -629,7 +644,7 @@ function renderNodeInspector(node, inspector) {
   const body = document.createElement("div");
   body.className = "inspector-form";
   const config = node.config;
-  const group = nodeClass(node.kind) === "trigger" ? "Triggers" : nodeClass(node.kind) === "condition" ? "Conditions" : "Actions";
+  const group = NODE_TYPES.find(([, kind]) => kind === node.kind)?.[0] || "Actions";
   body.append(field("Behavior", select(node.kind, NODE_TYPES.filter(([name]) => name === group).map(([, kind, label]) => [kind, label]), kind => change(() => {
     node.kind = kind;
     node.config = defaultConfig(kind);
@@ -637,6 +652,20 @@ function renderNodeInspector(node, inspector) {
 
   if (node.kind === "trigger.schedule") scheduleFields(node, body);
   else if (node.kind === "condition.compare") conditionFields(node, body);
+  else if (node.kind === "step.wait") {
+    body.append(field("Seconds", input(config.seconds, {type: "number", min: 0, max: 86400, step: .1, change: value => mutateConfig(node, "seconds", Number(value))}), true));
+  } else if (node.kind === "step.hold_true") {
+    body.append(
+      field("For", input(config.value, {type: "number", min: 0, max: config.unit === "minutes" ? 1440 : 86400, step: .1, change: value => mutateConfig(node, "value", Number(value))})),
+      field("Unit", select(config.unit, [["seconds", "Seconds"], ["minutes", "Minutes"]], value => mutateConfig(node, "unit", value)))
+    );
+    const note = document.createElement("p");
+    note.className = "muted wide";
+    note.textContent = "Continues only while the latest live trigger or condition stays true.";
+    body.append(note);
+  } else if (node.kind === "step.set_variable") {
+    body.append(field("Name", input(config.name, {maxlength: 64, change: value => mutateConfig(node, "name", value)}), true), scalarValueField(config));
+  }
   else {
     if (CAMERA_KINDS.has(node.kind)) body.append(cameraSelect(node, TRIGGERS.has(node.kind)));
     if (node.kind === "trigger.camera.class_presence") body.append(field("Object class", select(config.label, ["person", "car", "motorcycle", "bicycle"].map(value => [value, value[0].toUpperCase() + value.slice(1)]), value => mutateConfig(node, "label", value))));
@@ -684,31 +713,6 @@ function sourceOutcomes(edge) {
   return [["success", "Continue"]];
 }
 
-function scalarEditor(step, index, edge) {
-  const row = document.createElement("div");
-  row.className = "edge-step";
-  const heading = document.createElement("strong");
-  heading.textContent = step.type === "wait" ? "Wait" : "Set variable";
-  const controls = document.createElement("div");
-  controls.className = "step-controls";
-  const up = document.createElement("button"), down = document.createElement("button"), remove = document.createElement("button");
-  for (const button of [up, down, remove]) { button.type = "button"; button.className = "mini-button"; }
-  up.textContent = "↑"; up.title = "Move up"; up.disabled = index === 0;
-  down.textContent = "↓"; down.title = "Move down"; down.disabled = index === edge.steps.length - 1;
-  remove.textContent = "×"; remove.title = "Remove step";
-  up.onclick = () => change(() => { [edge.steps[index - 1], edge.steps[index]] = [edge.steps[index], edge.steps[index - 1]]; });
-  down.onclick = () => change(() => { [edge.steps[index + 1], edge.steps[index]] = [edge.steps[index], edge.steps[index + 1]]; });
-  remove.onclick = () => change(() => edge.steps.splice(index, 1));
-  controls.append(up, down, remove);
-  row.append(heading, controls);
-  if (step.type === "wait") {
-    row.append(field("Seconds", input(step.seconds, {type: "number", min: 0, max: 86400, step: .1, change: value => change(() => { step.seconds = Number(value); })}), true));
-  } else {
-    row.append(field("Name", input(step.name, {maxlength: 64, change: value => change(() => { step.name = value; })})), scalarValueField(step));
-  }
-  return row;
-}
-
 function scalarValueField(step) {
   const currentType = step.value === null ? "null" : typeof step.value;
   const wrap = document.createElement("div");
@@ -740,20 +744,11 @@ function renderEdgeInspector(edge, inspector) {
   head.append(heading, remove);
   const body = document.createElement("div");
   body.className = "inspector-form edge-inspector";
-  body.append(field("Follow when", select(edge.outcome, sourceOutcomes(edge), value => change(() => { edge.outcome = value; })), true));
-  const stepHead = document.createElement("div");
-  stepHead.className = "edge-step-head wide";
-  const label = document.createElement("strong"); label.textContent = "Transition steps";
-  const actions = document.createElement("div");
-  const wait = document.createElement("button"), variable = document.createElement("button");
-  for (const button of [wait, variable]) { button.type = "button"; button.className = "btn small"; }
-  wait.textContent = "+ Wait"; variable.textContent = "+ Variable";
-  wait.onclick = () => change(() => edge.steps.push({type: "wait", seconds: 10}));
-  variable.onclick = () => change(() => edge.steps.push({type: "set_variable", name: "value", value: true}));
-  actions.append(wait, variable); stepHead.append(label, actions); body.append(stepHead);
-  edge.steps.forEach((step, index) => body.append(scalarEditor(step, index, edge)));
-  if (!edge.steps.length) {
-    const note = document.createElement("p"); note.className = "muted wide"; note.textContent = "No wait or variable steps."; body.append(note);
+  const outcomes = sourceOutcomes(edge);
+  if (outcomes.length > 1) {
+    body.append(field("Follow when", select(edge.outcome, outcomes, value => change(() => { edge.outcome = value; })), true));
+  } else {
+    const note = document.createElement("p"); note.className = "muted wide"; note.textContent = "Follows the arrow direction."; body.append(note);
   }
   inspector.append(head, body);
 }

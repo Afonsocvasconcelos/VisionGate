@@ -1317,6 +1317,17 @@ class VisionManager:
         }
 
     def _automation_state(self, field: str, config: dict, _context: dict):
+        if field == "state.object_class_present":
+            with self.lock:
+                workers = (
+                    list(self.workers.values())
+                    if config.get("camera_id") == "*"
+                    else [self.workers.get(config.get("camera_id"))]
+                )
+            return any(
+                worker and config.get("label") in worker._object_labels
+                for worker in workers
+            )
         if field in {"state.camera_online", "state.authorized_count"}:
             with self.lock:
                 if config.get("camera_id") == "*":

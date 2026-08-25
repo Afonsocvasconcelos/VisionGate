@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -717,6 +718,31 @@ class WebAccessTests(unittest.TestCase):
             self.assertEqual(
                 manager._automation_state("state.authorized_count", {"camera_id": "*"}, {}),
                 1,
+            )
+
+    def test_object_class_automation_state_reads_the_live_scene(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "class-state.db")
+            settings = database.update_settings(DEFAULT_SETTINGS)
+            manager = VisionManager(database, _config(settings))
+            manager.workers = {
+                1: type("Worker", (), {"_object_labels": {"person"}})(),
+                2: type("Worker", (), {"_object_labels": {"car"}})(),
+            }
+
+            self.assertTrue(
+                manager._automation_state(
+                    "state.object_class_present",
+                    {"camera_id": "*", "label": "person"},
+                    {},
+                )
+            )
+            self.assertFalse(
+                manager._automation_state(
+                    "state.object_class_present",
+                    {"camera_id": 1, "label": "car"},
+                    {},
+                )
             )
 
     def test_ewelink_online_automation_state_uses_saved_inventory(self):
@@ -1583,10 +1609,23 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn('id="nodeInspector"', page.text)
         self.assertIn('id="dryRunAutomation"', page.text)
         self.assertIn('id="runAutomation"', page.text)
+        self.assertEqual(
+            re.findall(
+                r'<button class="node-template [^"]+"[^>]*><strong>([^<]+)</strong>',
+                page.text,
+            ),
+            ["Trigger", "Condition", "Action", "Step"],
+        )
+        self.assertNotIn('data-node-kind="step.hold_true"', page.text)
         self.assertIn("trigger.schedule", script.text)
         self.assertIn("scheduleTime", script.text)
-        self.assertIn("set_variable", script.text)
-        self.assertIn("edge-chip-bg", script.text)
+        self.assertIn('"step.wait"', script.text)
+        self.assertIn('"step.hold_true"', script.text)
+        self.assertIn('marker-end', script.text)
+        self.assertIn('marker.setAttribute("markerUnits", "userSpaceOnUse")', script.text)
+        self.assertIn('marker.setAttribute("markerWidth", "10")', script.text)
+        self.assertIn('marker.setAttribute("markerHeight", "10")', script.text)
+        self.assertNotIn("Transition steps", script.text)
         self.assertIn('["position", "Set position"]', script.text)
         self.assertIn('type: "color"', script.text)
         self.assertIn("pointerdown", script.text)
@@ -1595,7 +1634,9 @@ class WebAccessTests(unittest.TestCase):
         self.assertIn(".mobile-graph", stylesheet.text)
         self.assertIn(".graph-node.condition::before", stylesheet.text)
         self.assertIn("clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%)", stylesheet.text)
-        self.assertIn(".edge-chip-bg", stylesheet.text)
+        self.assertIn(".graph-node.step", stylesheet.text)
+        self.assertRegex(stylesheet.text, r"\.graph-edge \{[^}]*stroke-width: 2;")
+        self.assertRegex(stylesheet.text, r"\.graph-edge\.selected \{[^}]*stroke-width: 3;")
 
         with TestClient(app) as client:
             dashboard = client.get("/").text

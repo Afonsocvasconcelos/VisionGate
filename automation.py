@@ -35,7 +35,15 @@ ACTION_KINDS = {
     "action.log",
 }
 CONDITION_KINDS = {"condition.compare"}
-NODE_KINDS = TRIGGER_KINDS | ACTION_KINDS | CONDITION_KINDS
+STEP_KINDS = {"step.wait", "step.hold_true", "step.set_variable"}
+HOLDABLE_TRIGGER_KINDS = {
+    "trigger.camera.authorized_presence",
+    "trigger.camera.class_presence",
+    "trigger.camera.connection",
+    "trigger.ewelink.property_changed",
+    "trigger.ewelink.connection",
+}
+NODE_KINDS = TRIGGER_KINDS | ACTION_KINDS | CONDITION_KINDS | STEP_KINDS
 CAMERA_TRIGGERS = {kind for kind in TRIGGER_KINDS if kind.startswith("trigger.camera.")}
 EWELINK_TRIGGERS = {kind for kind in TRIGGER_KINDS if kind.startswith("trigger.ewelink.")}
 CAMERA_ACTIONS = {kind for kind in ACTION_KINDS if kind.startswith("action.camera.")}
@@ -79,6 +87,12 @@ def _config_fields(kind: str, config: dict) -> set[str]:
             if config.get("field") == "state.ewelink_online":
                 fields.discard("property")
         return fields
+    if kind == "step.wait":
+        return {"seconds"}
+    if kind == "step.hold_true":
+        return {"value", "unit"}
+    if kind == "step.set_variable":
+        return {"name", "value"}
     return {
         "action.ewelink.switch": {"device_id", "channel", "state"},
         "action.ewelink.button": {"device_id", "channel", "pulse_seconds"},
@@ -338,6 +352,30 @@ def _validate_node(node: dict, issues: list[str], resources: dict | None) -> Non
         issues.extend(_schedule_issues(config))
     if kind == "condition.compare":
         _validate_condition(config, issues, resources)
+    if kind == "step.wait":
+        seconds = config.get("seconds")
+        if (
+            not isinstance(seconds, (int, float))
+            or type(seconds) is bool
+            or not 0 <= seconds <= 86400
+        ):
+            issues.append("wait must be between 0 and 86400 seconds")
+    if kind == "step.hold_true":
+        value, unit = config.get("value"), config.get("unit")
+        if (
+            not isinstance(value, (int, float))
+            or type(value) is bool
+            or unit not in {"seconds", "minutes"}
+            or not 0 <= value * ({"seconds": 1, "minutes": 60}.get(unit) or 0) <= 86400
+        ):
+            issues.append(
+                "hold true must use seconds or minutes and be between 0 and 86400 seconds"
+            )
+    if kind == "step.set_variable":
+        if not isinstance(config.get("name"), str) or not VARIABLE.fullmatch(config["name"]):
+            issues.append("variable name is invalid")
+        if not isinstance(config.get("value"), (str, int, float, bool, type(None))):
+            issues.append("variable must be a scalar value")
     if kind == "action.log":
         message = config.get("message")
         if not isinstance(message, str) or not message.strip() or len(message) > 500:
@@ -398,12 +436,117 @@ def _validate_node(node: dict, issues: list[str], resources: dict | None) -> Non
                 issues.append(f"eWeLink action is not supported: {error}")
 
 
+def _available_id(prefix: str, used: set[str]) -> str:
+    base = re.sub(r"[^A-Za-z0-9_-]", "-", prefix).strip("-")[:60] or "step"
+    candidate = base
+    number = 2
+    while candidate in used:
+        suffix = f"-{number}"
+        candidate = f"{base[:64 - len(suffix)]}{suffix}"
+        number += 1
+    used.add(candidate)
+    return candidate
+
+
+def _upgrade_edge_steps(graph: dict) -> bool:
+    nodes, edges = graph.get("nodes"), graph.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        return False
+    node_ids = {
+        node["id"]
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    edge_ids = {
+        edge["id"]
+        for edge in edges
+        if isinstance(edge, dict) and isinstance(edge.get("id"), str)
+    }
+    node_positions = {
+        node["id"]: node.get("position", {"x": 0, "y": 0})
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+
+    def coordinate(position: dict, axis: str) -> float:
+        value = position.get(axis)
+        return value if isinstance(value, (int, float)) and type(value) is not bool else 0
+
+    upgraded_edges = []
+    changed = False
+    for edge in edges:
+        if not isinstance(edge, dict) or "steps" not in edge:
+            upgraded_edges.append(edge)
+            continue
+        steps = edge.pop("steps")
+        changed = True
+        if steps == []:
+            upgraded_edges.append(edge)
+            continue
+        if not isinstance(steps, list) or any(
+            not isinstance(step, dict) or step.get("type") not in {"wait", "set_variable"}
+            for step in steps
+        ):
+            edge["steps"] = steps
+            upgraded_edges.append(edge)
+            continue
+
+        source, target = edge.get("from"), edge.get("to")
+        source_position = node_positions.get(source, {}) if isinstance(source, str) else {}
+        target_position = node_positions.get(target, {}) if isinstance(target, str) else {}
+        if not isinstance(source_position, dict):
+            source_position = {}
+        if not isinstance(target_position, dict):
+            target_position = {}
+        step_ids = []
+        for index, step in enumerate(steps, 1):
+            step_id = _available_id(f"{edge.get('id', 'edge')}-{step['type']}-{index}", node_ids)
+            fraction = index / (len(steps) + 1)
+            position = {
+                axis: round(
+                    coordinate(source_position, axis)
+                    + (coordinate(target_position, axis) - coordinate(source_position, axis)) * fraction
+                )
+                for axis in ("x", "y")
+            }
+            nodes.append(
+                {
+                    "id": step_id,
+                    "kind": f"step.{step['type']}",
+                    "config": {key: value for key, value in step.items() if key != "type"},
+                    "position": position,
+                }
+            )
+            node_positions[step_id] = position
+            step_ids.append(step_id)
+
+        target_port = edge.get("to_port", "left")
+        edge["to"], edge["to_port"] = step_ids[0], "left"
+        upgraded_edges.append(edge)
+        for index, step_id in enumerate(step_ids):
+            next_id = step_ids[index + 1] if index + 1 < len(step_ids) else target
+            upgraded_edges.append(
+                {
+                    "id": _available_id(f"{edge.get('id', 'edge')}-next-{index + 1}", edge_ids),
+                    "from": step_id,
+                    "to": next_id,
+                    "from_port": "right",
+                    "to_port": "left" if next_id in step_ids else target_port,
+                    "outcome": "success",
+                }
+            )
+    graph["edges"] = upgraded_edges
+    return changed
+
+
 def validate_graph(graph: dict, resources: dict | None = None) -> dict:
     """Validate and return a JSON-safe AutomationGraph v1 document."""
     try:
         graph = json.loads(json.dumps(graph))
     except (TypeError, ValueError) as error:
         raise GraphValidationError("automation graph must contain JSON values") from error
+    if isinstance(graph, dict):
+        _upgrade_edge_steps(graph)
     issues: list[str] = []
     if not isinstance(graph, dict):
         raise GraphValidationError("automation graph must be an object")
@@ -469,10 +612,10 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
             issues.append("every edge needs a unique safe ID")
             continue
         edge_ids.add(edge_id)
-        if extra := set(edge) - {"id", "from", "to", "from_port", "to_port", "outcome", "steps"}:
+        if extra := set(edge) - {"id", "from", "to", "from_port", "to_port", "outcome"}:
             issues.append(f"edge {edge_id} contains unsupported field(s): {', '.join(sorted(extra))}")
         source, target = edge.get("from"), edge.get("to")
-        if source not in node_map or target not in node_map:
+        if not isinstance(source, str) or not isinstance(target, str) or source not in node_map or target not in node_map:
             issues.append(f"edge {edge_id} references a missing node")
             continue
         if source == target:
@@ -484,7 +627,7 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
         source_kind = node_map[source].get("kind")
         for field, fallback in (("from_port", "right"), ("to_port", "left")):
             edge.setdefault(field, fallback)
-            if edge[field] not in {"top", "right", "bottom", "left"}:
+            if not isinstance(edge[field], str) or edge[field] not in {"top", "right", "bottom", "left"}:
                 issues.append(f"edge {edge_id} {field} is invalid")
         expected = (
             {"true", "false"}
@@ -493,35 +636,9 @@ def validate_graph(graph: dict, resources: dict | None = None) -> dict:
             if source_kind in ACTION_KINDS
             else {"success"}
         )
-        if edge.get("outcome", "success") not in expected:
+        if not isinstance(edge.get("outcome", "success"), str) or edge.get("outcome", "success") not in expected:
             issues.append(f"edge {edge_id} outcome is invalid for {source_kind}")
         edge.setdefault("outcome", "success")
-        steps = edge.setdefault("steps", [])
-        if not isinstance(steps, list) or len(steps) > 32:
-            issues.append(f"edge {edge_id} must contain at most 32 steps")
-            continue
-        for step in steps:
-            if not isinstance(step, dict):
-                issues.append(f"edge {edge_id} contains an invalid step")
-            elif step.get("type") == "wait":
-                if extra := set(step) - {"type", "seconds"}:
-                    issues.append(f"edge {edge_id} wait contains unsupported field(s): {', '.join(sorted(extra))}")
-                seconds = step.get("seconds")
-                if (
-                    not isinstance(seconds, (int, float))
-                    or type(seconds) is bool
-                    or not 0 <= seconds <= 86400
-                ):
-                    issues.append(f"edge {edge_id} wait must be between 0 and 86400 seconds")
-            elif step.get("type") == "set_variable":
-                if extra := set(step) - {"type", "name", "value"}:
-                    issues.append(f"edge {edge_id} variable contains unsupported field(s): {', '.join(sorted(extra))}")
-                if not isinstance(step.get("name"), str) or not VARIABLE.fullmatch(step["name"]):
-                    issues.append(f"edge {edge_id} variable name is invalid")
-                if not isinstance(step.get("value"), (str, int, float, bool, type(None))):
-                    issues.append(f"edge {edge_id} variable must be a scalar value")
-            else:
-                issues.append(f"edge {edge_id} contains an unsupported step")
 
     trigger_ids = {
         node_id for node_id, node in node_map.items() if node.get("kind") in TRIGGER_KINDS
@@ -602,7 +719,6 @@ def default_device_graph(
             "from_port": "right",
             "to_port": "left",
             "outcome": "success",
-            "steps": [],
         }
     ]
     if auto_close_seconds > 0:
@@ -615,6 +731,12 @@ def default_device_graph(
                     "position": {"x": 40, "y": 260},
                 },
                 {
+                    "id": "close-delay",
+                    "kind": "step.wait",
+                    "config": {"seconds": auto_close_seconds},
+                    "position": {"x": 310, "y": 280},
+                },
+                {
                     "id": "still-away",
                     "kind": "condition.compare",
                     "config": {
@@ -624,13 +746,13 @@ def default_device_graph(
                         "value_type": "number",
                         "camera_id": "*",
                     },
-                    "position": {"x": 360, "y": 260},
+                    "position": {"x": 500, "y": 260},
                 },
                 {
                     "id": "close-door",
                     "kind": "action.ewelink.button",
                     "config": {"device_id": device_id, "channel": close_channel, "pulse_seconds": pulse_seconds},
-                    "position": {"x": 620, "y": 260},
+                    "position": {"x": 780, "y": 260},
                 },
             ]
         )
@@ -639,11 +761,18 @@ def default_device_graph(
                 {
                     "id": "left-wait-check",
                     "from": "authorized-left",
+                    "to": "close-delay",
+                    "from_port": "right",
+                    "to_port": "left",
+                    "outcome": "success",
+                },
+                {
+                    "id": "wait-still-away",
+                    "from": "close-delay",
                     "to": "still-away",
                     "from_port": "right",
                     "to_port": "left",
                     "outcome": "success",
-                    "steps": [{"type": "wait", "seconds": auto_close_seconds}],
                 },
                 {
                     "id": "still-away-close",
@@ -652,7 +781,6 @@ def default_device_graph(
                     "from_port": "right",
                     "to_port": "left",
                     "outcome": "true",
-                    "steps": [],
                 },
             ]
         )
@@ -670,7 +798,7 @@ def default_device_graph(
 def upgrade_automation_graph(graph: dict, settings: dict) -> tuple[dict, bool]:
     """Convert legacy single-door graphs to general device automations."""
     upgraded = json.loads(json.dumps(graph))
-    changed = False
+    changed = _upgrade_edge_steps(upgraded)
     device_id = str(settings.get("ewelink_device_id") or "").strip()
     pulse = float(settings.get("pulse_seconds") or 1)
     trigger_kinds = {
@@ -904,12 +1032,57 @@ class AutomationEngine:
             "less_or_equal": lambda: left <= right,
         }[operator]()
 
+    def _predicate_holds(self, predicate: dict | None, context: dict) -> bool:
+        if not predicate:
+            return False
+        kind, config = predicate["kind"], predicate["config"]
+        if kind in CONDITION_KINDS:
+            return self._evaluate(config, context) == (predicate["outcome"] == "true")
+        if kind == "trigger.camera.authorized_presence":
+            count = self.state_provider("state.authorized_count", config, context)
+            return (
+                isinstance(count, (int, float))
+                and type(count) is not bool
+                and (count > 0) == config["present"]
+            )
+        if kind == "trigger.camera.class_presence":
+            present = self.state_provider("state.object_class_present", config, context)
+            return type(present) is bool and present == config["present"]
+        if kind == "trigger.camera.connection":
+            return self.state_provider("state.camera_online", config, context) == config["online"]
+        if kind == "trigger.ewelink.connection":
+            return self.state_provider("state.ewelink_online", config, context) == config["online"]
+        if kind == "trigger.ewelink.property_changed":
+            return self.state_provider("state.ewelink_property", config, context) == context[
+                "event"
+            ].get("value")
+        return False
+
     def _perform_node(self, node: dict, context: dict, dry_run: bool) -> tuple[str, dict]:
         kind, config = node["kind"], node["config"]
         if kind in TRIGGER_KINDS:
             return "success", {}
         if kind in CONDITION_KINDS:
             return ("true" if self._evaluate(config, context) else "false"), {}
+        if kind == "step.wait":
+            if self.stop_event.wait(config["seconds"]):
+                raise _RunCanceled()
+            return "success", {}
+        if kind == "step.hold_true":
+            deadline = time.monotonic() + config["value"] * (
+                60 if config["unit"] == "minutes" else 1
+            )
+            while self._predicate_holds(context.get("held_predicate"), context):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "success", {}
+                # ponytail: 100 ms matches camera cadence; use event cancellation if sub-frame gaps matter.
+                if self.stop_event.wait(min(0.1, remaining)):
+                    raise _RunCanceled()
+            return "stopped", {}
+        if kind == "step.set_variable":
+            context["variables"][config["name"]] = config.get("value")
+            return "success", {}
         if dry_run:
             return "success", {"simulated": True}
         resource = self._resource_key(kind, config)
@@ -920,16 +1093,17 @@ class AutomationEngine:
                 return "success", self.action_handler(kind, config, context) or {}
         return "success", self.action_handler(kind, config, context) or {}
 
-    def _edge_context(self, edge: dict, context: dict) -> dict:
+    def _edge_context(self, context: dict, source: dict, outcome: str) -> dict:
         branch = {"event": context["event"], "variables": dict(context["variables"])}
-        for step in edge["steps"]:
-            if self.stop_event.is_set():
-                raise _RunCanceled()
-            if step["type"] == "wait":
-                if self.stop_event.wait(step["seconds"]):
-                    raise _RunCanceled()
-            else:
-                branch["variables"][step["name"]] = step.get("value")
+        predicate = context.get("held_predicate")
+        if source["kind"] in CONDITION_KINDS | HOLDABLE_TRIGGER_KINDS:
+            predicate = {
+                "kind": source["kind"],
+                "config": dict(source["config"]),
+                "outcome": outcome,
+            }
+        if predicate:
+            branch["held_predicate"] = predicate
         return branch
 
     def _execute_run(
@@ -981,7 +1155,7 @@ class AutomationEngine:
                 return
 
             def follow(edge: dict) -> None:
-                visit(edge["to"], self._edge_context(edge, context))
+                visit(edge["to"], self._edge_context(context, node, outcome))
 
             if len(edges) > 1:
                 with ThreadPoolExecutor(max_workers=min(16, len(edges))) as pool:
