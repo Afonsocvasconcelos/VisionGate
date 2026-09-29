@@ -1326,6 +1326,32 @@ class WebAccessTests(unittest.TestCase):
         self.assertEqual(qr.status_code, 403)
         self.assertEqual(password.status_code, 403)
 
+    def test_remote_ewelink_reconnect_is_available_over_https(self):
+        cloud_devices = [{
+            "id": "1000abcd12", "name": "Gate", "device_key": "device-secret"
+        }]
+        with patch.object(
+            app_module.EWELINK_CLOUD, "account_devices", return_value=cloud_devices
+        ) as account_devices, patch(
+            "app.add_lan_addresses", side_effect=lambda devices: devices
+        ):
+            with TestClient(
+                app, base_url="https://testserver", client=("85.240.109.3", 50000)
+            ) as client:
+                setup = client.get("/api/ewelink/oauth/setup")
+                login = client.post("/api/ewelink/import/password", json={
+                    "account": "owner@example.com",
+                    "password": "account-secret",
+                    "country_code": "+351",
+                    "region": "eu",
+                })
+
+        self.assertEqual(setup.status_code, 200)
+        self.assertTrue(setup.json()["local_login_allowed"])
+        self.assertEqual(login.status_code, 200)
+        self.assertNotIn("account-secret", login.text)
+        account_devices.assert_called_once()
+
     def test_imported_device_is_saved_without_assigning_a_special_role(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "import.db")

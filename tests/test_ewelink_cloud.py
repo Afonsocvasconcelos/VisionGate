@@ -47,6 +47,19 @@ class EWeLinkCloudTests(unittest.TestCase):
 
         self.assertNotIn("do-not-return", str(raised.exception))
 
+    def test_refresh_rotates_both_tokens(self):
+        response = FakeResponse({"error": 0, "data": {"at": "new-access", "rt": "new-refresh"}})
+        with patch("ewelink_cloud.urlopen", return_value=response) as mocked:
+            tokens = EWeLinkCloud.refresh_access_token(
+                "client-id", "old-access", "old-refresh", "eu"
+            )
+
+        request = mocked.call_args.args[0]
+        self.assertEqual(tokens, ("new-access", "new-refresh"))
+        self.assertEqual(request.full_url, "https://eu-apia.coolkit.cc/v2/user/refresh")
+        self.assertEqual(request.headers["Authorization"], "Bearer old-access")
+        self.assertEqual(json.loads(request.data), {"rt": "old-refresh"})
+
     def test_service_name_maps_to_the_matching_device_id(self):
         self.assertEqual(
             service_device_id("eWeLink_1000abcd12._ewelink._tcp.local."),
@@ -88,7 +101,7 @@ class EWeLinkCloudTests(unittest.TestCase):
     def test_oauth_exchanges_code_and_returns_only_real_devices(self):
         responses = [
             FakeResponse(
-                {"error": 0, "data": {"accessToken": "access-token"}, "msg": ""}
+                {"error": 0, "data": {"accessToken": "access-token", "refreshToken": "refresh-token"}, "msg": ""}
             ),
             FakeResponse(
                 {
@@ -154,6 +167,7 @@ class EWeLinkCloudTests(unittest.TestCase):
                         }
                     ],
                     "_cloud_token": "access-token",
+                    "_cloud_refresh_token": "refresh-token",
                     "_cloud_app_id": "client-id",
                     "_cloud_region": "eu",
                 }
@@ -177,6 +191,7 @@ class EWeLinkCloudTests(unittest.TestCase):
                     "error": 0,
                     "data": {
                         "at": "access-token",
+                        "rt": "refresh-token",
                         "user": {"apikey": "account-api-key"},
                     },
                     "msg": "",
@@ -205,6 +220,7 @@ class EWeLinkCloudTests(unittest.TestCase):
                     "error": 0,
                     "data": {
                         "at": "access-token",
+                        "rt": "refresh-token",
                         "user": {"apikey": "account-api-key"},
                     },
                     "msg": "",
@@ -241,6 +257,7 @@ class EWeLinkCloudTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(login_request.data)["email"], "owner@example.com")
         self.assertEqual(devices[0]["_cloud_token"], "access-token")
+        self.assertEqual(devices[0]["_cloud_refresh_token"], "refresh-token")
         self.assertEqual(devices[0]["_cloud_region"], "eu")
         self.assertEqual(devices[0]["_cloud_user_apikey"], "account-api-key")
 

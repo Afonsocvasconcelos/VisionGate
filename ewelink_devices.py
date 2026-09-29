@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from core import ewelink_request
-from ewelink_cloud import cloud_device_request, typed_device_action
+from ewelink_cloud import EWeLinkCloudError, cloud_device_request, typed_device_action
 
 
 log = logging.getLogger("visiongate.ewelink")
@@ -28,6 +28,43 @@ class EWeLinkDeviceManager:
         self._live_thread: threading.Thread | None = None
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self.cloud_error: str | None = None
+
+    def _refresh_cloud_token(self, previous_token: str) -> str:
+        with self._refresh_lock:
+            settings = self.database.settings()
+            current_token = settings.get("ewelink_cloud_token")
+            if current_token and current_token != previous_token:
+                return current_token
+            refresh_token = settings.get("ewelink_cloud_refresh_token")
+            if not refresh_token:
+                self.cloud_error = (
+                    "eWeLink access expired. Sign in to eWeLink again to reconnect devices."
+                )
+                raise EWeLinkCloudError(self.cloud_error)
+            try:
+                access_token, new_refresh_token = self.cloud.refresh_access_token(
+                    settings["ewelink_cloud_app_id"],
+                    previous_token,
+                    refresh_token,
+                    settings["ewelink_cloud_region"],
+                )
+            except EWeLinkCloudError as error:
+                if error.code in {401, 402}:
+                    self.cloud_error = (
+                        "eWeLink authorization expired. Sign in to eWeLink again to reconnect devices."
+                    )
+                    raise EWeLinkCloudError(self.cloud_error) from error
+                raise
+            self.database.update_settings(
+                {
+                    "ewelink_cloud_token": access_token,
+                    "ewelink_cloud_refresh_token": new_refresh_token,
+                }
+            )
+            self.cloud_error = None
+            return access_token
 
     @staticmethod
     def _known_state(device) -> tuple[dict, dict]:
@@ -139,23 +176,22 @@ class EWeLinkDeviceManager:
             None,
         )
         if credentials:
-            self.database.update_settings(
-                {
-                    "ewelink_cloud_token": credentials["_cloud_token"],
-                    "ewelink_cloud_app_id": credentials["_cloud_app_id"],
-                    "ewelink_cloud_region": credentials["_cloud_region"],
-                    **(
-                        {
-                            "ewelink_cloud_user_apikey": credentials[
-                                "_cloud_user_apikey"
-                            ]
-                        }
-                        if credentials.get("_cloud_user_apikey")
-                        else {}
-                    ),
-                }
-            )
+            with self._refresh_lock:
+                self.database.update_settings(
+                    {
+                        "ewelink_cloud_token": credentials["_cloud_token"],
+                        "ewelink_cloud_refresh_token": credentials.get(
+                            "_cloud_refresh_token", ""
+                        ),
+                        "ewelink_cloud_app_id": credentials["_cloud_app_id"],
+                        "ewelink_cloud_region": credentials["_cloud_region"],
+                        "ewelink_cloud_user_apikey": credentials.get(
+                            "_cloud_user_apikey", ""
+                        ),
+                    }
+                )
         self.database.sync_ewelink_devices(devices)
+        self.cloud_error = None
         return self.list_public()
 
     @staticmethod
@@ -167,8 +203,10 @@ class EWeLinkDeviceManager:
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise RuntimeError("eWeLink returned an invalid response") from error
         if not isinstance(payload, dict) or payload.get("error", 0):
-            raise RuntimeError(
-                f"eWeLink rejected the command ({payload.get('error', 'invalid response') if isinstance(payload, dict) else 'invalid response'})"
+            code = payload.get("error") if isinstance(payload, dict) else None
+            raise EWeLinkCloudError(
+                f"eWeLink rejected the command ({code if code is not None else 'invalid response'})",
+                code=code,
             )
         return payload
 
@@ -178,7 +216,9 @@ class EWeLinkDeviceManager:
                 return self._decode_response(response)
         except HTTPError as error:
             error.close()
-            raise RuntimeError(f"eWeLink returned HTTP {error.code}") from error
+            raise EWeLinkCloudError(
+                f"eWeLink returned HTTP {error.code}", code=error.code
+            ) from error
         except (URLError, TimeoutError, OSError) as error:
             raise RuntimeError(str(error)) from error
 
@@ -208,11 +248,29 @@ class EWeLinkDeviceManager:
         )
         if all(cloud):
             try:
-                self._open(
-                    cloud_device_request(
-                        cloud[0], cloud[1], cloud[2], device.device_id, specification["params"]
+                def send_cloud(token, app_id, region):
+                    self._open(
+                        cloud_device_request(
+                            token,
+                            app_id,
+                            region,
+                            device.device_id,
+                            specification["params"],
+                        )
                     )
-                )
+
+                try:
+                    send_cloud(*cloud)
+                except EWeLinkCloudError as error:
+                    if error.code not in {401, 402}:
+                        raise
+                    self._refresh_cloud_token(cloud[0])
+                    fresh = self.database.settings()
+                    send_cloud(
+                        fresh["ewelink_cloud_token"],
+                        fresh["ewelink_cloud_app_id"],
+                        fresh["ewelink_cloud_region"],
+                    )
                 return "cloud"
             except (RuntimeError, ValueError) as cloud_error:
                 if lan_error:
@@ -302,8 +360,25 @@ class EWeLinkDeviceManager:
         if not self.cloud or not all(credentials):
             return self.list_public()
         previous = {item.device_id: item for item in self.database.ewelink_devices()}
-        devices = self.cloud.token_devices(*credentials)
+        try:
+            devices = self.cloud.token_devices(*credentials)
+        except EWeLinkCloudError as error:
+            if error.code not in {401, 402}:
+                self.cloud_error = str(error)
+                raise
+            try:
+                self._refresh_cloud_token(credentials[1])
+                fresh = self.database.settings()
+                devices = self.cloud.token_devices(
+                    fresh["ewelink_cloud_app_id"],
+                    fresh["ewelink_cloud_token"],
+                    fresh["ewelink_cloud_region"],
+                )
+            except EWeLinkCloudError as refresh_error:
+                self.cloud_error = str(refresh_error)
+                raise
         self.database.sync_ewelink_devices(devices)
+        self.cloud_error = None
         for current in self.database.ewelink_devices():
             if before := previous.get(current.device_id):
                 self._emit_changes(before, current)
@@ -363,12 +438,34 @@ class EWeLinkDeviceManager:
                     failures = 0
                     self._stop.wait(5)
                     continue
-                self.cloud.listen_updates(
-                    *credentials, self._stop, self.apply_cloud_update
-                )
+                try:
+                    self.cloud.listen_updates(
+                        *credentials, self._stop, self.apply_cloud_update
+                    )
+                except EWeLinkCloudError as error:
+                    if error.code not in {401, 402}:
+                        raise
+                    self._refresh_cloud_token(credentials[0])
+                    fresh = self.database.settings()
+                    credentials = (
+                        fresh["ewelink_cloud_token"],
+                        fresh["ewelink_cloud_app_id"],
+                        fresh["ewelink_cloud_region"],
+                        fresh["ewelink_cloud_user_apikey"],
+                    )
+                    self.cloud.listen_updates(
+                        *credentials, self._stop, self.apply_cloud_update
+                    )
                 failures = 0
             except Exception as error:
                 failures += 1
+                if (
+                    isinstance(error, EWeLinkCloudError)
+                    and error.code in {401, 402, 406}
+                ):
+                    self.cloud_error = (
+                        "eWeLink access expired. Sign in to eWeLink again to reconnect devices."
+                    )
                 log.warning("eWeLink live connection failed: %s", error)
             if not self._stop.is_set():
                 self._stop.wait(min(15 * 2 ** max(0, failures - 1), 15 * 60))

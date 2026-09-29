@@ -8,6 +8,7 @@ let enrollmentReview = null;
 let enrollmentSelection = new Map();
 let enrollmentPoll = null;
 let ewelinkDevices = [];
+let ewelinkCloudError = null;
 let dashboardAutomations = [];
 let dashboard = {selected: null, modules: [], available_modules: []};
 let dashboardResources = {cameras: [], ewelink: [], identities: []};
@@ -621,7 +622,7 @@ async function loadEwelinkSetup() {
   $("ewelinkCallback").value = setup.callback_url;
   $("ewelinkQrLogin").disabled = !setup.local_login_allowed;
   $("ewelinkPasswordLogin").disabled = !setup.local_login_allowed;
-  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open http://127.0.0.1:83 on this PC to import an eWeLink device.";
+  if (!setup.local_login_allowed) $("ewelinkImportStatus").textContent = "For account safety, open VisionGate on its PC at http://127.0.0.1:83 or use HTTPS on this device to reconnect eWeLink.";
 }
 
 function deviceActionButton(label, action) {
@@ -763,7 +764,7 @@ function renderEwelinkDevices() {
   const query = $("ewelinkDeviceSearch").value.trim().toLowerCase();
   const filtered = ewelinkDevices.filter(device => `${device.name} ${device.model}`.toLowerCase().includes(query));
   list.replaceChildren();
-  $("ewelinkConnection").textContent = ewelinkDevices.length ? `${ewelinkDevices.length} device${ewelinkDevices.length === 1 ? "" : "s"} synced` : "No eWeLink account devices imported";
+  $("ewelinkConnection").textContent = ewelinkCloudError || (ewelinkDevices.length ? `${ewelinkDevices.length} device${ewelinkDevices.length === 1 ? "" : "s"} synced` : "No eWeLink account devices imported");
   if (!filtered.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -811,6 +812,7 @@ function renderEwelinkDevices() {
 
 async function loadEwelinkDevices(refresh = false) {
   ewelinkDevices = await api("/api/ewelink/devices" + (refresh ? "/refresh" : ""), refresh ? {method: "POST"} : {});
+  ewelinkCloudError = (await api("/api/ewelink/connection")).error;
   renderEwelinkDevices();
 }
 
@@ -818,7 +820,11 @@ $("ewelinkDeviceSearch").oninput = renderEwelinkDevices;
 $("refreshEwelinkDevices").onclick = async () => {
   $("refreshEwelinkDevices").disabled = true;
   try { await loadEwelinkDevices(true); toast("eWeLink devices refreshed"); }
-  catch (error) { toast(error.message); }
+  catch (error) {
+    ewelinkCloudError = error.message;
+    renderEwelinkDevices();
+    toast(error.message);
+  }
   finally { $("refreshEwelinkDevices").disabled = false; }
 };
 

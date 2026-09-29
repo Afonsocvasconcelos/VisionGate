@@ -36,7 +36,9 @@ SONOFFLAN_APP_SECRET = "1ve5Qk9GXfUhKAn1svnKwpAlxXkMarru"
 
 
 class EWeLinkCloudError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def websocket_handshake(
@@ -510,12 +512,14 @@ class EWeLinkCloud:
                 payload = cls._decode(response)
         except HTTPError as error:
             error.close()
-            raise EWeLinkCloudError(f"eWeLink returned HTTP {error.code}") from error
+            raise EWeLinkCloudError(
+                f"eWeLink returned HTTP {error.code}", code=error.code
+            ) from error
         except (URLError, TimeoutError, OSError) as error:
             raise EWeLinkCloudError("Could not reach eWeLink; check the internet connection") from error
         if payload.get("error", 0):
             code = payload.get("error")
-            raise EWeLinkCloudError(f"eWeLink rejected the request ({code})")
+            raise EWeLinkCloudError(f"eWeLink rejected the request ({code})", code=code)
         return payload.get("data") or {}
 
     @classmethod
@@ -535,6 +539,31 @@ class EWeLinkCloud:
                 method="POST",
             )
         )
+
+    @classmethod
+    def refresh_access_token(
+        cls, app_id: str, access_token: str, refresh_token: str, region: str
+    ) -> tuple[str, str]:
+        if region not in API_HOSTS:
+            raise ValueError("Select a valid eWeLink region")
+        if not all((app_id, access_token, refresh_token)):
+            raise ValueError("eWeLink refresh authorization is incomplete")
+        body = json.dumps({"rt": refresh_token}, separators=(",", ":")).encode()
+        data = cls._open(
+            Request(
+                f"{API_HOSTS[region]}/v2/user/refresh",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "X-CK-Appid": app_id,
+                },
+                method="POST",
+            )
+        )
+        if not isinstance(data, dict) or not data.get("at") or not data.get("rt"):
+            raise EWeLinkCloudError("eWeLink returned invalid refresh credentials")
+        return str(data["at"]), str(data["rt"])
 
     @classmethod
     def _devices(cls, app_id: str, access_token: str, region: str) -> list[dict]:
@@ -599,6 +628,7 @@ class EWeLinkCloud:
             },
         )
         token = data.get("accessToken") or data.get("at")
+        refresh_token = data.get("refreshToken") or data.get("rt")
         if not token:
             raise EWeLinkCloudError("eWeLink did not return an access token")
         devices = self._devices(app_id, str(token), region)
@@ -607,6 +637,11 @@ class EWeLinkCloud:
             device.update(
                 {
                     "_cloud_token": str(token),
+                    **(
+                        {"_cloud_refresh_token": str(refresh_token)}
+                        if refresh_token
+                        else {}
+                    ),
                     "_cloud_app_id": app_id,
                     "_cloud_region": region,
                     **(
@@ -639,6 +674,7 @@ class EWeLinkCloud:
             f"{API_HOSTS[region]}/v2/user/login", app_id, app_secret, payload
         )
         token = data.get("at") or data.get("accessToken")
+        refresh_token = data.get("rt") or data.get("refreshToken")
         actual_region = str(data.get("region") or region)
         if not token:
             raise EWeLinkCloudError("eWeLink did not return an access token")
@@ -648,6 +684,11 @@ class EWeLinkCloud:
             device.update(
                 {
                     "_cloud_token": str(token),
+                    **(
+                        {"_cloud_refresh_token": str(refresh_token)}
+                        if refresh_token
+                        else {}
+                    ),
                     "_cloud_app_id": app_id,
                     "_cloud_region": actual_region,
                     **(
@@ -744,7 +785,10 @@ class EWeLinkCloud:
             except (asyncio.TimeoutError, json.JSONDecodeError) as error:
                 raise EWeLinkCloudError("eWeLink live authorization timed out") from error
             if not isinstance(response, dict) or response.get("error", 0):
-                raise EWeLinkCloudError("eWeLink rejected the live connection")
+                raise EWeLinkCloudError(
+                    "eWeLink rejected the live connection",
+                    code=response.get("error") if isinstance(response, dict) else None,
+                )
             heartbeat = response.get("config", {}).get("hbInterval", 90)
             heartbeat = max(15, min(300, int(heartbeat)))
             last_ping = time.monotonic()

@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.error import URLError
 
 from core import Database
+from ewelink_cloud import EWeLinkCloudError
 from ewelink_devices import EWeLinkDeviceManager
 
 
@@ -41,6 +42,7 @@ def four_channel_device(**values):
             ]
         },
         "_cloud_token": "cloud-token",
+        "_cloud_refresh_token": "refresh-token",
         "_cloud_app_id": "cloud-app",
         "_cloud_region": "eu",
         "_cloud_user_apikey": "account-api-key",
@@ -49,6 +51,59 @@ def four_channel_device(**values):
 
 
 class EWeLinkDeviceManagerTests(unittest.TestCase):
+    def test_expired_access_refreshes_inventory_and_saves_rotated_tokens(self):
+        class Cloud:
+            def __init__(self):
+                self.calls = []
+
+            def token_devices(self, app_id, token, region):
+                self.calls.append((app_id, token, region))
+                if token == "cloud-token":
+                    raise EWeLinkCloudError("eWeLink rejected the request (402)", code=402)
+                return [four_channel_device()]
+
+            def refresh_access_token(self, app_id, token, refresh, region):
+                self.calls.append((app_id, token, refresh, region))
+                return "new-access", "new-refresh"
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "refresh.db")
+            database.update_settings({
+                "ewelink_cloud_app_id": "cloud-app",
+                "ewelink_cloud_token": "cloud-token",
+                "ewelink_cloud_refresh_token": "old-refresh",
+                "ewelink_cloud_region": "eu",
+            })
+            cloud = Cloud()
+            manager = EWeLinkDeviceManager(database, cloud)
+            devices = manager.refresh()
+
+            self.assertEqual(len(devices), 1)
+            self.assertEqual(database.settings()["ewelink_cloud_token"], "new-access")
+            self.assertEqual(database.settings()["ewelink_cloud_refresh_token"], "new-refresh")
+            self.assertEqual(cloud.calls[-1], ("cloud-app", "new-access", "eu"))
+            self.assertIsNone(manager.cloud_error)
+
+    def test_legacy_expired_session_prompts_for_sign_in_without_deleting_devices(self):
+        class Cloud:
+            def token_devices(self, *_args):
+                raise EWeLinkCloudError("eWeLink rejected the request (402)", code=402)
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "legacy.db")
+            database.update_settings({
+                "ewelink_cloud_app_id": "cloud-app",
+                "ewelink_cloud_token": "old-access",
+                "ewelink_cloud_region": "eu",
+            })
+            database.sync_ewelink_devices([four_channel_device()])
+            manager = EWeLinkDeviceManager(database, Cloud())
+            with self.assertRaisesRegex(EWeLinkCloudError, "Sign in to eWeLink again"):
+                manager.refresh()
+
+            self.assertEqual(len(database.ewelink_devices()), 1)
+            self.assertIn("Sign in to eWeLink again", manager.cloud_error)
+
     def test_live_reconnect_uses_bounded_exponential_backoff(self):
         class DatabaseSettings:
             @staticmethod
@@ -148,7 +203,9 @@ class EWeLinkDeviceManagerTests(unittest.TestCase):
             self.assertNotIn("secret-device-key", serialized)
             self.assertNotIn("lamp-key", serialized)
             self.assertNotIn("cloud-token", serialized)
+            self.assertNotIn("refresh-token", serialized)
             self.assertEqual(database.settings()["ewelink_cloud_region"], "eu")
+            self.assertEqual(database.settings()["ewelink_cloud_refresh_token"], "refresh-token")
             self.assertEqual(
                 database.settings()["ewelink_cloud_user_apikey"], "account-api-key"
             )
@@ -181,6 +238,34 @@ class EWeLinkDeviceManagerTests(unittest.TestCase):
                 {"switches": [{"outlet": 1, "switch": "on"}]},
             )
             self.assertEqual(result["state"]["switches"][1]["switch"], "on")
+
+    def test_cloud_action_retries_after_access_token_refresh(self):
+        class Cloud:
+            @staticmethod
+            def refresh_access_token(app_id, token, refresh, region):
+                self.assertEqual((app_id, token, refresh, region),
+                                 ("cloud-app", "cloud-token", "refresh-token", "eu"))
+                return "new-access", "new-refresh"
+
+        requests = []
+
+        def opener(request, timeout=0):
+            requests.append(request)
+            return FakeResponse({"error": 402} if len(requests) == 1 else {"error": 0})
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "action-refresh.db")
+            manager = EWeLinkDeviceManager(database, Cloud(), opener=opener)
+            manager.import_devices([four_channel_device()])
+
+            result = manager.execute(
+                "1000abcd12", "switch", {"channel": 1, "state": "on"}
+            )
+
+            self.assertEqual(result["control_mode"], "cloud")
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(requests[1].headers["Authorization"], "Bearer new-access")
+            self.assertEqual(database.settings()["ewelink_cloud_refresh_token"], "new-refresh")
 
     def test_lan_failure_falls_back_to_cloud(self):
         calls = []

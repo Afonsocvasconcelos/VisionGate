@@ -35,18 +35,18 @@ No Home Assistant, developer account, or MQTT broker is required. VisionGate pre
 
 1. Pair the 4CH Pro R2 in the ordinary eWeLink app and install any offered firmware update.
 2. On the VisionGate PC, open `http://127.0.0.1:83`.
-3. Select **Settings > Devices > Import device from eWeLink**.
+3. Select **Settings > Devices > Connect or reconnect eWeLink**.
 4. Enter the ordinary eWeLink account and password, then choose **Sign in and find devices**. The password is used once and is never saved.
 5. VisionGate saves every device returned by the account. A later sign-in refreshes that inventory and marks removed devices unavailable.
 6. Use the device card's **Pulse** control on channels `1` and `2` while the door can be observed safely.
 7. In **Automations**, drag a Trigger and Action to the canvas. Set the trigger to authorized presence `true`, then set the action to the 4CH Pro R2, channel `1`, and a short pulse.
 8. For closing, connect authorized presence `false` through a **Wait** block and an authorized-count condition to a channel `2` pulse. Physical obstruction protection and an independent timeout remain required.
 
-VisionGate refreshes the persistent eWeLink inventory once per minute. The 4CH Pro R2's momentary relays cannot sense physical door position; add a contact sensor if physical open/closed state is required.
+VisionGate refreshes the persistent eWeLink inventory once per minute and renews expired cloud access using the saved refresh token. Installations connected before this change need one new eWeLink sign-in to save a refresh token. The 4CH Pro R2's momentary relays cannot sense physical door position; add a contact sensor if physical open/closed state is required.
 
 The account importer uses the open-source [SonoffLAN](https://github.com/AlexxIT/SonoffLAN) compatibility identity. Official developer QR login and manual device-key entry remain available as fallbacks.
 
-For credential safety, eWeLink importer sign-in is enabled only at `http://127.0.0.1:83` on the VisionGate PC. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
+For credential safety, eWeLink sign-in is enabled at `http://127.0.0.1:83` on the VisionGate PC or through an HTTPS connection from another device. The public `http://` address cannot submit eWeLink credentials. Keep the door's physical obstruction sensors and independent safe timeout enabled; camera-based auto-close is not a substitute for either.
 
 ## Run
 

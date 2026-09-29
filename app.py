@@ -1841,10 +1841,10 @@ def _local_request(request: Request) -> bool:
 
 
 def _require_local_login(request: Request) -> None:
-    if not _local_request(request):
+    if not (_local_request(request) or request.url.scheme == "https"):
         raise HTTPException(
             403,
-            f"For account safety, open VisionGate at http://127.0.0.1:{APP_PORT} on its PC to import eWeLink devices",
+            f"For account safety, open VisionGate at http://127.0.0.1:{APP_PORT} on its PC or use HTTPS to reconnect eWeLink devices",
         )
 
 
@@ -2050,6 +2050,7 @@ def _public_settings(settings: dict) -> dict:
         "pulse_seconds",
         "auto_close_seconds",
         "ewelink_cloud_token",
+        "ewelink_cloud_refresh_token",
         "ewelink_cloud_app_id",
         "ewelink_cloud_region",
         "ewelink_cloud_user_apikey",
@@ -2096,6 +2097,11 @@ def devices():
 @app.get("/api/ewelink/devices")
 def ewelink_devices():
     return MANAGER.devices.list_public()
+
+
+@app.get("/api/ewelink/connection")
+def ewelink_connection():
+    return {"error": MANAGER.devices.cloud_error}
 
 
 @app.post("/api/ewelink/devices/refresh")
@@ -2413,7 +2419,7 @@ def ewelink_oauth_setup(request: Request):
     return {
         "callback_url": str(request.url_for("ewelink_oauth_callback")),
         "developer_url": "https://dev.ewelink.cc/",
-        "local_login_allowed": _local_request(request),
+        "local_login_allowed": _local_request(request) or request.url.scheme == "https",
     }
 
 
